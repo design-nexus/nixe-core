@@ -3,5 +3,6 @@
 
 pub mod app;
 pub mod cmd;
+pub mod migrate;
 pub mod paths;
 pub mod prefs;
