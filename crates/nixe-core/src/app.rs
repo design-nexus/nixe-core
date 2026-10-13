@@ -18,8 +18,10 @@ pub fn init(app: App) {
     let _ = APP.set(app);
 }
 
+/// The running app. Code run without [`init`] (unit tests) gets a neutral
+/// identity, so it never reads or writes a real app's files.
 pub fn get() -> App {
-    *APP.get().expect("nixe_core::app::init must run first")
+    *APP.get_or_init(|| App { slug: "nixe-test", name: "Nixe" })
 }
 
 pub fn slug() -> &'static str {

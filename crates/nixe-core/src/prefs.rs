@@ -60,6 +60,17 @@ impl<T: Serialize + DeserializeOwned + Default + Clone + 'static> Store<T> {
         Self::load(paths::prefs_file())
     }
 
+    /// The standard file, then `fix` to fill in anything that must not stay
+    /// empty. If `fix` changed something, the file is written back.
+    pub fn standard_with(fix: fn(&mut T) -> bool) -> Rc<Self> {
+        let store = Self::standard();
+        let changed = fix(&mut store.value.borrow_mut());
+        if changed {
+            store.save();
+        }
+        store
+    }
+
     pub fn get(&self) -> T {
         self.value.borrow().clone()
     }
