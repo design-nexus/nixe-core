@@ -41,12 +41,7 @@ impl<T: Serialize + DeserializeOwned + Default + Clone + 'static> Store<T> {
                 Err(e) => {
                     let backup = file.with_extension("toml.bak");
                     let _ = std::fs::copy(&file, &backup);
-                    eprintln!(
-                        "{}: {} couldn't be read ({e}); kept a copy as {}",
-                        app::slug(),
-                        file.display(),
-                        backup.display()
-                    );
+                    eprintln!("{}: {} couldn't be read ({e}); kept a copy as {}", app::slug(), file.display(), backup.display());
                     broken = true;
                     T::default()
                 }
