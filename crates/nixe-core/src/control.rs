@@ -28,9 +28,17 @@ const XML: &str = r#"<node>
   </interface>
 </node>"#;
 
+/// The answer to one `Call`: give it the result once (now or from a later callback).
+pub type Reply = Box<dyn FnOnce(Result<Value, String>)>;
+
 /// Register the interface for `app` (call from `connect_startup`). `tools` is what
 /// `Describe` returns; `handler` answers `Call`.
 pub fn serve(app: &gtk::Application, tools: Value, handler: impl Fn(&str, Value) -> Result<Value, String> + 'static) {
+    serve_async(app, tools, move |name, args, reply| reply(handler(name, args)));
+}
+
+/// As `serve`, for handlers that answer later (after a database read, say).
+pub fn serve_async(app: &gtk::Application, tools: Value, handler: impl Fn(&str, Value, Reply) + 'static) {
     let (Some(connection), Some(path)) = (app.dbus_connection(), app.dbus_object_path()) else {
         return;
     };
@@ -41,23 +49,24 @@ pub fn serve(app: &gtk::Application, tools: Value, handler: impl Fn(&str, Value)
     let tools = tools.to_string();
     let registered = connection
         .register_object(&path, &info)
-        .method_call(move |_, _, _, _, method, params, invocation| {
-            let reply = match method {
-                "Describe" => tools.clone(),
-                "Call" => {
-                    let (name, arguments) = params.get::<(String, String)>().unwrap_or_default();
-                    let arguments = serde_json::from_str(&arguments).unwrap_or(json!({}));
-                    match handler(&name, arguments) {
-                        Ok(v) => json!({ "ok": v }).to_string(),
-                        Err(e) => json!({ "error": e }).to_string(),
-                    }
-                }
-                _ => {
-                    invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method);
-                    return;
-                }
-            };
-            invocation.return_value(Some(&(reply,).to_variant()));
+        .method_call(move |_, _, _, _, method, params, invocation| match method {
+            "Describe" => invocation.return_value(Some(&(tools.clone(),).to_variant())),
+            "Call" => {
+                let (name, arguments) = params.get::<(String, String)>().unwrap_or_default();
+                let arguments = serde_json::from_str(&arguments).unwrap_or(json!({}));
+                handler(
+                    &name,
+                    arguments,
+                    Box::new(move |result| {
+                        let reply = match result {
+                            Ok(v) => json!({ "ok": v }),
+                            Err(e) => json!({ "error": e }),
+                        };
+                        invocation.return_value(Some(&(reply.to_string(),).to_variant()));
+                    }),
+                );
+            }
+            _ => invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method),
         })
         .build();
     if let Err(e) = registered {
