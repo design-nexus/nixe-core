@@ -1,7 +1,9 @@
 //! Running external commands without blocking the UI thread.
 
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "gtk")]
 use gtk::prelude::*;
+#[cfg(feature = "gtk")]
 use gtk::{gio, glib};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -46,6 +48,7 @@ pub fn spawn(args: &[&str]) {
     });
 }
 
+#[cfg(feature = "gtk")]
 /// Run a command off the main thread and deliver the result back on it.
 pub fn run_async<F>(args: &[&str], done: F)
 where
@@ -61,6 +64,7 @@ where
     );
 }
 
+#[cfg(feature = "gtk")]
 /// Run arbitrary blocking work off the main thread, then call `done` on it.
 pub fn background<T, W, F>(work: W, done: F)
 where
@@ -92,6 +96,7 @@ pub fn open_in_editor(path: &Path) {
     }
 }
 
+#[cfg(feature = "gtk")]
 /// Show `path` selected in the file manager, or open its folder if no file
 /// manager answers on D-Bus.
 pub fn show_in_folder(path: &Path) {

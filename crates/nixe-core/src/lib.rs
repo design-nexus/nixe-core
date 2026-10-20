@@ -3,7 +3,9 @@
 
 pub mod app;
 pub mod cmd;
+#[cfg(feature = "gtk")]
 pub mod control;
 pub mod migrate;
 pub mod paths;
+#[cfg(feature = "gtk")]
 pub mod prefs;
