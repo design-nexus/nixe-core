@@ -1,0 +1,420 @@
+//! One calendar or task list: read, expand, change and watch its items.
+
+use crate::ical::{self, Draft, Item, ItemKind};
+use crate::{Error, Kind, Owned, Registry, cstring, owned, take_error};
+use ecal_sys as ecal;
+use glib::prelude::*;
+use glib::translate::FromGlibPtrFull;
+use ical_glib_sys as icalsys;
+use std::marker::PhantomData;
+
+/// Which occurrences of a repeating item a change applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    This,
+    ThisAndFollowing,
+    All,
+}
+
+impl Scope {
+    fn raw(self) -> ecal::ECalObjModType {
+        match self {
+            Self::This => ecal::E_CAL_OBJ_MOD_THIS,
+            Self::ThisAndFollowing => ecal::E_CAL_OBJ_MOD_THIS_AND_FUTURE,
+            Self::All => ecal::E_CAL_OBJ_MOD_ALL,
+        }
+    }
+}
+
+/// An open calendar or task list. Not `Send`: see the crate docs.
+pub struct Calendar {
+    obj: glib::Object,
+    kind: Kind,
+    /// EDS's local file backend ("On this computer").
+    local_file: bool,
+    zone: *mut icalsys::ICalTimezone,
+    _thread: PhantomData<*const ()>,
+}
+
+/// Keeps a [`Calendar::watch`] callback connected until dropped.
+pub struct View {
+    obj: glib::Object,
+    handlers: Vec<glib::SignalHandlerId>,
+}
+
+impl Drop for View {
+    fn drop(&mut self) {
+        for id in self.handlers.drain(..) {
+            self.obj.disconnect(id);
+        }
+        unsafe { ecal::e_cal_client_view_stop(self.obj.as_ptr().cast(), std::ptr::null_mut()) };
+    }
+}
+
+impl Calendar {
+    /// Opens a source. `wait` is how many seconds to wait for the backend to come
+    /// online; `None` (or 0) opens at once, from the offline cache if need be.
+    /// (libecal itself treats 0 as "wait forever".)
+    pub fn open(registry: &Registry, uid: &str, kind: Kind, wait: Option<u32>) -> Result<Self, Error> {
+        let wait = wait.filter(|w| *w > 0).unwrap_or(u32::MAX);
+        let local_file = registry.source(uid, kind).is_some_and(|s| s.backend == "local");
+        let source = registry.ref_source(uid).ok_or_else(|| Error::NotFound("That calendar no longer exists.".into()))?;
+        let source_type = match kind {
+            Kind::Calendar => ecal::E_CAL_CLIENT_SOURCE_TYPE_EVENTS,
+            Kind::TaskList => ecal::E_CAL_CLIENT_SOURCE_TYPE_TASKS,
+        };
+        let mut err = std::ptr::null_mut();
+        let ptr = unsafe {
+            ecal::e_cal_client_connect_sync(source.ptr().cast(), source_type, wait, std::ptr::null_mut(), &mut err)
+        };
+        if ptr.is_null() {
+            return Err(unsafe { take_error(err) });
+        }
+        let obj = unsafe { glib::Object::from_glib_full(ptr.cast::<gobject_sys::GObject>()) };
+        let zone = ical::zone(&ical::local_zone());
+        unsafe { ecal::e_cal_client_set_default_timezone(obj.as_ptr().cast(), zone) };
+        Ok(Self { obj, kind, local_file, zone, _thread: PhantomData })
+    }
+
+    fn raw(&self) -> *mut ecal::ECalClient {
+        self.obj.as_ptr().cast()
+    }
+
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// The calendar can't be changed (a subscription, a shared read-only calendar).
+    pub fn read_only(&self) -> bool {
+        unsafe { edata_server_sys::e_client_is_readonly(self.raw().cast()) != 0 }
+    }
+
+    /// The backend supports a capability (`edata_server_sys` / libecal names such
+    /// as `"no-task-assignment"`). Used to hide controls a list can't store.
+    pub fn can(&self, capability: &str) -> bool {
+        let c = cstring(capability);
+        unsafe { edata_server_sys::e_client_check_capability(self.raw().cast(), c.as_ptr()) != 0 }
+    }
+
+    /// Every occurrence that overlaps `[from, to)` (Unix seconds), with repeating
+    /// events expanded by libical in their own time zones.
+    pub fn instances(&self, from: i64, to: i64) -> Vec<Item> {
+        let mut data = Collect { out: Vec::new(), zone: self.zone };
+        if self.local_file {
+            // EDS 3.62's local file backend leaves a changed occurrence out of its
+            // time index (e-cal-backend-file.c, E_CAL_OBJ_MOD_THIS), so a range
+            // query misses it until EDS restarts. Expand each matching item from
+            // all of its components instead.
+            let uids: std::collections::BTreeSet<String> =
+                self.items(&range_query(from, to)).unwrap_or_default().into_iter().map(|i| i.uid).collect();
+            for uid in uids {
+                let Ok(master) = self.fetch(&uid, None) else { continue };
+                unsafe {
+                    ecal::e_cal_client_generate_instances_for_object_sync(
+                        self.raw(),
+                        master.ptr(),
+                        from as libc::time_t,
+                        to as libc::time_t,
+                        std::ptr::null_mut(),
+                        Some(collect),
+                        (&mut data as *mut Collect).cast(),
+                    );
+                }
+            }
+        } else {
+            unsafe {
+                ecal::e_cal_client_generate_instances_sync(
+                    self.raw(),
+                    from as libc::time_t,
+                    to as libc::time_t,
+                    std::ptr::null_mut(),
+                    Some(collect),
+                    (&mut data as *mut Collect).cast(),
+                );
+            }
+        }
+        data.out.sort_by_key(|i| i.start);
+        data.out
+    }
+
+    /// Items matching an EDS query (`"#t"` for all), not expanded. Used for task lists.
+    pub fn items(&self, query: &str) -> Result<Vec<Item>, Error> {
+        let query = cstring(query);
+        let mut list = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_get_object_list_as_comps_sync(
+                self.raw(),
+                query.as_ptr(),
+                &mut list,
+                std::ptr::null_mut(),
+                &mut err,
+            )
+        };
+        if ok == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        let mut out = Vec::new();
+        let mut node = list;
+        while !node.is_null() {
+            unsafe {
+                let comp = ecal::e_cal_component_get_icalcomponent((*node).data.cast());
+                if !comp.is_null() {
+                    out.push(ical::item(comp, None, self.zone));
+                }
+                node = (*node).next;
+            }
+        }
+        unsafe { edata_server_sys::e_client_util_free_object_slist(list) };
+        Ok(out)
+    }
+
+    /// One item (or one occurrence, with `rid`).
+    pub fn get(&self, uid: &str, rid: Option<&str>) -> Result<Item, Error> {
+        let comp = self.fetch(uid, rid)?;
+        Ok(unsafe { ical::item(comp.ptr(), None, self.zone) })
+    }
+
+    /// One item as iCalendar text, for export.
+    pub fn ics(&self, uid: &str, rid: Option<&str>) -> Result<String, Error> {
+        let comp = self.fetch(uid, rid)?;
+        Ok(unsafe { owned(icalsys::i_cal_component_as_ical_string(comp.ptr())) }.unwrap_or_default())
+    }
+
+    fn fetch(&self, uid: &str, rid: Option<&str>) -> Result<Owned<icalsys::ICalComponent>, Error> {
+        let uid = cstring(uid);
+        let rid = rid.map(cstring);
+        let mut comp = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_get_object_sync(
+                self.raw(),
+                uid.as_ptr(),
+                rid.as_ref().map_or(std::ptr::null(), |r| r.as_ptr()),
+                &mut comp,
+                std::ptr::null_mut(),
+                &mut err,
+            )
+        };
+        if ok == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        unsafe { Owned::new(comp) }.ok_or_else(|| Error::NotFound("That item no longer exists.".into()))
+    }
+
+    /// Creates an item from a draft and returns its uid.
+    pub fn create(&self, draft: &Draft) -> Result<String, Error> {
+        let kind = match self.kind {
+            Kind::Calendar => ItemKind::Event,
+            Kind::TaskList => ItemKind::Task,
+        };
+        let comp = ical::new_component(kind);
+        let zone = unsafe { ical::apply(comp.ptr(), draft) };
+        self.add_zone(zone)?;
+        let mut uid = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_create_object_sync(
+                self.raw(),
+                comp.ptr(),
+                ecal::E_CAL_OPERATION_FLAG_NONE,
+                &mut uid,
+                std::ptr::null_mut(),
+                &mut err,
+            )
+        };
+        if ok == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        Ok(unsafe { owned(uid) }.unwrap_or_default())
+    }
+
+    /// Applies a draft to an item. For a repeating item, `rid` and `scope` pick
+    /// the occurrences.
+    pub fn modify(&self, uid: &str, rid: Option<&str>, scope: Scope, draft: &Draft) -> Result<(), Error> {
+        let comp = self.fetch(uid, rid)?;
+        let scope = if rid.is_some() { scope } else { Scope::All };
+        if let (Some(rid), Scope::This | Scope::ThisAndFollowing) = (rid, scope) {
+            unsafe { ical::detach(comp.ptr(), rid) };
+        }
+        let zone = unsafe { ical::apply(comp.ptr(), draft) };
+        self.add_zone(zone)?;
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_modify_object_sync(
+                self.raw(),
+                comp.ptr(),
+                scope.raw(),
+                ecal::E_CAL_OPERATION_FLAG_NONE,
+                std::ptr::null_mut(),
+                &mut err,
+            )
+        };
+        if ok == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        Ok(())
+    }
+
+    /// Removes an item, or some occurrences of a repeating one.
+    pub fn remove(&self, uid: &str, rid: Option<&str>, scope: Scope) -> Result<(), Error> {
+        let uid = cstring(uid);
+        let rid = rid.map(cstring);
+        let scope = if rid.is_some() { scope } else { Scope::All };
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_remove_object_sync(
+                self.raw(),
+                uid.as_ptr(),
+                rid.as_ref().map_or(std::ptr::null(), |r| r.as_ptr()),
+                scope.raw(),
+                ecal::E_CAL_OPERATION_FLAG_NONE,
+                std::ptr::null_mut(),
+                &mut err,
+            )
+        };
+        if ok == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        Ok(())
+    }
+
+    /// Imports one VEVENT or VTODO (or the first one inside a VCALENDAR) as a new
+    /// item, keeping its uid. Returns the uid.
+    pub fn import(&self, ics: &str) -> Result<String, Error> {
+        let text = cstring(ics);
+        let parsed = unsafe { Owned::new(icalsys::i_cal_component_new_from_string(text.as_ptr())) }
+            .ok_or_else(|| Error::Failed("That isn't an iCalendar file.".into()))?;
+        let wanted = match self.kind {
+            Kind::Calendar => icalsys::I_CAL_VEVENT_COMPONENT,
+            Kind::TaskList => icalsys::I_CAL_VTODO_COMPONENT,
+        };
+        let comp = if unsafe { icalsys::i_cal_component_isa(parsed.ptr()) } == wanted {
+            parsed
+        } else {
+            unsafe { Owned::new(icalsys::i_cal_component_get_first_component(parsed.ptr(), wanted)) }
+                .ok_or_else(|| Error::Failed("The file has nothing to add here.".into()))?
+        };
+        let mut uid = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_create_object_sync(
+                self.raw(),
+                comp.ptr(),
+                ecal::E_CAL_OPERATION_FLAG_NONE,
+                &mut uid,
+                std::ptr::null_mut(),
+                &mut err,
+            )
+        };
+        if ok == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        Ok(unsafe { owned(uid) }.unwrap_or_default())
+    }
+
+    fn add_zone(&self, zone: *mut icalsys::ICalTimezone) -> Result<(), Error> {
+        if ical::is_utc(zone) {
+            return Ok(());
+        }
+        let mut err = std::ptr::null_mut();
+        if unsafe { ecal::e_cal_client_add_timezone_sync(self.raw(), zone, std::ptr::null_mut(), &mut err) } == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        Ok(())
+    }
+
+    /// Calls `on_change` when items matching `query` are added, changed or removed
+    /// (by this app, another app or a sync). Callers re-read what they show.
+    pub fn watch(&self, query: &str, on_change: impl Fn() + 'static) -> Result<View, Error> {
+        let query = cstring(query);
+        let mut view = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_get_view_sync(self.raw(), query.as_ptr(), &mut view, std::ptr::null_mut(), &mut err)
+        };
+        if ok == 0 || view.is_null() {
+            return Err(if err.is_null() { Error::Failed("Couldn't watch the calendar.".into()) } else { unsafe { take_error(err) } });
+        }
+        let obj = unsafe { glib::Object::from_glib_full(view.cast::<gobject_sys::GObject>()) };
+        let on_change = std::rc::Rc::new(on_change);
+        let handlers = ["objects-added", "objects-modified", "objects-removed"]
+            .into_iter()
+            .map(|signal| {
+                let on_change = on_change.clone();
+                obj.connect_local(signal, false, move |_| {
+                    on_change();
+                    None
+                })
+            })
+            .collect();
+        unsafe {
+            // Initial contents arrive as objects-added; callers have already read them.
+            ecal::e_cal_client_view_set_flags(obj.as_ptr().cast(), ecal::E_CAL_CLIENT_VIEW_FLAGS_NONE, std::ptr::null_mut());
+            let mut err = std::ptr::null_mut();
+            ecal::e_cal_client_view_start(obj.as_ptr().cast(), &mut err);
+            if !err.is_null() {
+                return Err(take_error(err));
+            }
+        }
+        Ok(View { obj, handlers })
+    }
+}
+
+struct Collect {
+    out: Vec<Item>,
+    zone: *mut icalsys::ICalTimezone,
+}
+
+unsafe extern "C" fn collect(
+    comp: *mut icalsys::ICalComponent,
+    start: *mut icalsys::ICalTime,
+    end: *mut icalsys::ICalTime,
+    data: glib_sys::gpointer,
+    _cancellable: *mut gio_sys::GCancellable,
+    _error: *mut *mut glib_sys::GError,
+) -> glib_sys::gboolean {
+    let data = unsafe { &mut *data.cast::<Collect>() };
+    data.out.push(unsafe { ical::item(comp, Some((start, end)), data.zone) });
+    1
+}
+
+/// An EDS query for items that occur in `[from, to)` (Unix seconds).
+pub fn range_query(from: i64, to: i64) -> String {
+    format!(r#"(occur-in-time-range? (make-time "{}") (make-time "{}"))"#, utc_stamp(from), utc_stamp(to))
+}
+
+fn utc_stamp(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil(days);
+    format!("{y:04}{m:02}{d:02}T{:02}{:02}{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+/// Days since 1970-01-01 to a proleptic Gregorian date.
+fn civil(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_query_uses_utc_stamps() {
+        assert_eq!(
+            range_query(1_793_631_600, 1_793_635_200),
+            r#"(occur-in-time-range? (make-time "20261102T150000Z") (make-time "20261102T160000Z"))"#
+        );
+        assert_eq!(utc_stamp(0), "19700101T000000Z");
+        assert_eq!(utc_stamp(951_782_400), "20000229T000000Z");
+    }
+}

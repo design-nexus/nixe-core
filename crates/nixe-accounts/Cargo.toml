@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# In-process GOA tokens and passwords, for binaries that sign in themselves.
+credentials = []
+
 [dependencies]
 anyhow = "1"
 gio = "0.22"

@@ -65,9 +65,16 @@ Removing the GOA account deletes local GOA config and keyring items for that acc
 
 `nixe-accounts` `Debug` for account structs: id, provider, presentation identity, flags. No identity passwords. Worker errors mapped to short sentences before they hit `window::toast`.
 
+## In-process credentials (`credentials` feature)
+
+`nixe-accounts` has `Client::access_token` and `Client::password` only when built with
+the `credentials` feature. Nixe Mail's engine (`nixe-maild`) enables it; Settings and
+Contacts do not. Both return a redacted `Secret` that is overwritten when dropped. The
+engine fetches one for each connection and never stores, logs or re-exports it.
+
 ## Review checklist (Phase 5)
 
-- [x] `rg` on the crate: no `access_token`, `refresh_token`, `client_secret` literals (2026-10-20)
+- [x] `rg` on the crate: no `access_token`, `refresh_token`, `client_secret` literals (2026-10-20). Since 2026-10-21 the `access_token` method exists, behind the `credentials` feature; there are still no token literals
 - [x] crate tests have no token fixtures; live `accounts.conf` has Provider/Identity (Google) plus GNOME OAuth2 URIs/client id with empty ClientSecret (Microsoft). No access/refresh tokens in that file. Nixe does not parse it.
 - [x] clippy + tests without a real token
 - [x] helper launched with argv that is only the binary name (`Command::new(HELPER)` with no args)

@@ -1,0 +1,196 @@
+//! Against a real Evolution Data Server on a private session bus with scratch XDG
+//! directories. Run with `tools/test-eds.sh`; plain `cargo test` skips these.
+
+use nixe_eds::{Calendar, Draft, Kind, Registry, Scope, When, range_query};
+use std::time::{Duration, Instant};
+
+const LOCAL_CALENDAR: &str = "system-calendar";
+const LOCAL_TASKS: &str = "system-task-list";
+
+fn registry() -> Registry {
+    assert!(
+        std::env::var("NIXE_EDS_SCRATCH").is_ok(),
+        "run through tools/test-eds.sh: these tests write to EDS"
+    );
+    Registry::connect().expect("EDS registry")
+}
+
+fn pump_until(mut done: impl FnMut() -> bool) -> bool {
+    let ctx = glib::MainContext::default();
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until {
+        while ctx.iteration(false) {}
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+// 2026-10-26 and 2026-11-02 are Mondays either side of the US switch back from
+// daylight saving on 2026-11-01. 10:00 in New York is 14:00 UTC, then 15:00 UTC.
+const OCT_26_1000_EDT: i64 = 1_793_023_200;
+const NOV_02_1000_EST: i64 = 1_793_631_600;
+const HOUR: i64 = 3600;
+const DAY: i64 = 86_400;
+
+#[test]
+#[ignore]
+fn weekly_event_keeps_wall_clock_across_dst() {
+    let registry = registry();
+    let sources = registry.sources(Kind::Calendar);
+    let local = sources.iter().find(|s| s.uid == LOCAL_CALENDAR).expect("local calendar listed");
+    assert!(local.local && local.account.is_none());
+
+    let cal = Calendar::open(&registry, LOCAL_CALENDAR, Kind::Calendar, None).unwrap();
+    assert!(!cal.read_only());
+    let uid = cal
+        .create(&Draft {
+            summary: Some("Standup".into()),
+            start: Some(Some(When::Time(OCT_26_1000_EDT))),
+            end: Some(Some(When::Time(OCT_26_1000_EDT + HOUR / 4))),
+            zone: Some("America/New_York".into()),
+            repeat: Some(Some("FREQ=WEEKLY;COUNT=3".into())),
+            ..Draft::default()
+        })
+        .unwrap();
+
+    let all: Vec<_> = cal
+        .instances(OCT_26_1000_EDT - DAY, OCT_26_1000_EDT + 30 * DAY)
+        .into_iter()
+        .filter(|i| i.uid == uid)
+        .collect();
+    let starts: Vec<_> = all.iter().map(|i| i.start).collect();
+    assert_eq!(
+        starts,
+        vec![
+            Some(When::Time(OCT_26_1000_EDT)),
+            Some(When::Time(NOV_02_1000_EST)),
+            Some(When::Time(NOV_02_1000_EST + 7 * DAY)),
+        ]
+    );
+    assert!(all.iter().all(|i| i.repeats && i.rid.is_some()));
+
+    // Move only the second occurrence, then drop the third.
+    let second = all[1].rid.clone().unwrap();
+    cal.modify(&uid, Some(&second), Scope::This, &Draft { summary: Some("Standup (moved)".into()), ..Draft::default() })
+        .unwrap();
+    let third = all[2].rid.clone().unwrap();
+    cal.remove(&uid, Some(&third), Scope::This).unwrap();
+
+    let after: Vec<_> = cal
+        .instances(OCT_26_1000_EDT - DAY, OCT_26_1000_EDT + 30 * DAY)
+        .into_iter()
+        .filter(|i| i.uid == uid)
+        .map(|i| i.summary)
+        .collect();
+    assert_eq!(after, vec!["Standup".to_string(), "Standup (moved)".to_string()]);
+
+    cal.remove(&uid, None, Scope::All).unwrap();
+    assert!(cal.instances(OCT_26_1000_EDT - DAY, OCT_26_1000_EDT + 30 * DAY).iter().all(|i| i.uid != uid));
+}
+
+#[test]
+#[ignore]
+fn all_day_event_and_import() {
+    let registry = registry();
+    let cal = Calendar::open(&registry, LOCAL_CALENDAR, Kind::Calendar, None).unwrap();
+    let day = When::Date { year: 2026, month: 12, day: 24 };
+    let uid = cal
+        .create(&Draft {
+            summary: Some("Holiday".into()),
+            start: Some(Some(day)),
+            end: Some(Some(When::Date { year: 2026, month: 12, day: 25 })),
+            ..Draft::default()
+        })
+        .unwrap();
+    let item = cal.get(&uid, None).unwrap();
+    assert!(item.all_day());
+    assert_eq!(item.start, Some(day));
+
+    let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:imported-1\r\n\
+               DTSTAMP:20261021T000000Z\r\nDTSTART:20261201T090000Z\r\nDTEND:20261201T100000Z\r\n\
+               SUMMARY:Imported\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    assert_eq!(cal.import(ics).unwrap(), "imported-1");
+    assert!(cal.ics("imported-1", None).unwrap().contains("SUMMARY:Imported"));
+    cal.remove("imported-1", None, Scope::All).unwrap();
+    cal.remove(&uid, None, Scope::All).unwrap();
+}
+
+#[test]
+#[ignore]
+fn tasks_subtasks_and_completion() {
+    let registry = registry();
+    assert!(registry.sources(Kind::TaskList).iter().any(|s| s.uid == LOCAL_TASKS));
+    let list = Calendar::open(&registry, LOCAL_TASKS, Kind::TaskList, None).unwrap();
+    let parent = list
+        .create(&Draft {
+            summary: Some("Trip".into()),
+            due: Some(Some(When::Date { year: 2026, month: 11, day: 20 })),
+            priority: Some(Some(1)),
+            ..Draft::default()
+        })
+        .unwrap();
+    let child = list
+        .create(&Draft { summary: Some("Book train".into()), parent: Some(Some(parent.clone())), ..Draft::default() })
+        .unwrap();
+
+    list.modify(&child, None, Scope::All, &Draft { done: Some(true), ..Draft::default() }).unwrap();
+    let items = list.items("#t").unwrap();
+    let child_item = items.iter().find(|i| i.uid == child).unwrap();
+    assert!(child_item.is_done());
+    assert_eq!(child_item.parent.as_deref(), Some(parent.as_str()));
+    let parent_item = items.iter().find(|i| i.uid == parent).unwrap();
+    assert_eq!(parent_item.priority, Some(1));
+    assert!(!parent_item.is_done());
+
+    list.modify(&child, None, Scope::All, &Draft { done: Some(false), ..Draft::default() }).unwrap();
+    assert!(!list.get(&child, None).unwrap().is_done());
+    list.remove(&child, None, Scope::All).unwrap();
+    list.remove(&parent, None, Scope::All).unwrap();
+}
+
+#[test]
+#[ignore]
+fn view_reports_changes_and_registry_toggles() {
+    let registry = registry();
+    let cal = Calendar::open(&registry, LOCAL_CALENDAR, Kind::Calendar, None).unwrap();
+    let changes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = changes.clone();
+    let _view = cal
+        .watch(&range_query(NOV_02_1000_EST - DAY, NOV_02_1000_EST + DAY), move || seen.set(seen.get() + 1))
+        .unwrap();
+    pump_until(|| true);
+    let before = changes.get();
+    let uid = cal
+        .create(&Draft {
+            summary: Some("Watched".into()),
+            start: Some(Some(When::Time(NOV_02_1000_EST))),
+            end: Some(Some(When::Time(NOV_02_1000_EST + HOUR))),
+            ..Draft::default()
+        })
+        .unwrap();
+    assert!(pump_until(|| changes.get() > before), "view saw the new event");
+    cal.remove(&uid, None, Scope::All).unwrap();
+
+    let source_changes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = source_changes.clone();
+    let _watch = registry.watch(move || seen.set(seen.get() + 1));
+    let original = registry.source(LOCAL_CALENDAR, Kind::Calendar).unwrap();
+    registry.set_color(LOCAL_CALENDAR, Kind::Calendar, "#7aa2f7").unwrap();
+    assert!(pump_until(|| source_changes.get() > 0), "registry reported the change");
+    assert!(pump_until(|| {
+        registry.source(LOCAL_CALENDAR, Kind::Calendar).unwrap().color.as_deref() == Some("#7aa2f7")
+    }));
+    registry.set_color(LOCAL_CALENDAR, Kind::Calendar, original.color.as_deref().unwrap_or("#becedd")).unwrap();
+}
+
+#[test]
+#[ignore]
+fn missing_items_are_not_found() {
+    let registry = registry();
+    let cal = Calendar::open(&registry, LOCAL_CALENDAR, Kind::Calendar, None).unwrap();
+    assert!(cal.get("no-such-uid", None).is_err());
+    assert!(Calendar::open(&registry, "no-such-source", Kind::Calendar, None).is_err());
+}

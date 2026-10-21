@@ -1,0 +1,5 @@
+gir 0.22.3, gir-files 0.22.5
+evolution-data-server 3.62.1-1
+libical 4.0.6-1
+json-glib 1.10.8-1
+libsoup3 3.8.0-1

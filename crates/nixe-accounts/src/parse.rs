@@ -113,7 +113,7 @@ pub(crate) fn prop_string(props: &glib::Variant, key: &str) -> Option<String> {
     })
 }
 
-fn prop_bool(props: &glib::Variant, key: &str) -> Option<bool> {
+pub(crate) fn prop_bool(props: &glib::Variant, key: &str) -> Option<bool> {
     let v = variant_prop(props, key)?;
     let inner = if v.is_container() && v.n_children() == 1 { v.child_value(0) } else { v };
     inner.get::<bool>()

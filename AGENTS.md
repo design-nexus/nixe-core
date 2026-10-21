@@ -1,7 +1,11 @@
 # Core
 
-Three existing libraries: application foundation, GOA/EDS metadata discovery,
-and provider-independent WebDAV sync. No UI, helper binary, or application internals are extracted.
+Libraries: application foundation, GOA accounts and EDS discovery (nixe-accounts),
+EDS calendars and task lists (nixe-eds over generated crates/eds/*-sys), natural-language
+dates (nixe-when) and provider-independent WebDAV sync. No UI, helper binary, or
+application internals are extracted. Regenerate FFI with tools/gen-eds.sh only when the
+EDS version changes; run tools/test-eds.sh after nixe-eds changes. Tokens stay behind
+nixe-accounts' `credentials` feature (docs/online-accounts/SECURITY.md).
 
 Commands: `cargo check --locked --workspace`; `cargo check --locked -p nixe-core --no-default-features`
 

@@ -1,4 +1,8 @@
-//! In-process client for GNOME Online Accounts and EDS discovery. Metadata only: no tokens, no GTK.
+//! In-process client for GNOME Online Accounts and EDS discovery. No GTK.
+//!
+//! Metadata only, unless the `credentials` feature is on: then [`credentials`]
+//! fetches tokens and passwords from GOA in-process for a binary that signs in
+//! itself (Nixe Mail's engine). Settings and Contacts leave it off.
 //!
 //! Talks to `org.gnome.OnlineAccounts` on the session bus. Add/reauth is
 //! `nixe-goa-helper` (libgoa-backend in a separate process). This crate does not
@@ -7,7 +11,10 @@
 
 mod parse;
 pub mod apps;
+#[cfg(feature = "credentials")]
+pub mod credentials;
 pub mod eds;
+pub mod mail;
 
 pub use parse::accounts_from_managed_objects;
 
@@ -373,7 +380,7 @@ impl Client {
         Ok(reply.try_child_value(0).and_then(|v| v.get::<i32>()).unwrap_or(0))
     }
 
-    fn call(
+    pub(crate) fn call(
         &self,
         path: &str,
         iface: &str,

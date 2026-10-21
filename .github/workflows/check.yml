@@ -23,3 +23,9 @@ jobs:
       - name: Build prerequisites
         run: bash tools/ci-bootstrap.sh
       - run: cargo check --locked --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - name: EDS calendar tests (private session bus)
+        run: |
+          useradd -m builder && chown -R builder: .
+          su builder -c 'tools/test-eds.sh'

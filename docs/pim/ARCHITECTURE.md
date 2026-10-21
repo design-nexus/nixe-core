@@ -123,3 +123,19 @@ No interface returns tokens or passwords.
 | WebDAV (Nextcloud, Fastmail, iCloud) | | EDS CalDAV | EDS CalDAV VTODO |
 | Microsoft 365 | Graph adapter, later | EDS with `evolution-ews`, later | |
 | This computer | | EDS local calendar | EDS local task list |
+
+## Known EDS behavior (3.62)
+
+Found while testing `nixe-eds` against a real EDS; the workarounds are in the crate.
+
+- `e_cal_client_connect_sync` treats a wait of 0 seconds as "wait forever".
+  `Calendar::open` takes `Option<u32>`; `None` passes `(guint32) -1`, which means don't wait.
+- EDS identifies an occurrence by its RECURRENCE-ID text as EDS wrote it (UTC for
+  expanded instances). Changing one occurrence needs the master detached into it
+  (DTSTART moved, rules dropped), and the RECURRENCE-ID text must be kept as is.
+- The local file backend ("On this computer") leaves a changed occurrence out of its
+  time index (`e-cal-backend-file.c`, `E_CAL_OBJ_MOD_THIS`), so range queries miss it
+  until EDS restarts. For local calendars `Calendar::instances` expands each matching
+  item from all of its components instead. CalDAV and Google calendars use EDS's
+  cache and are not affected. Worth reporting upstream.
+- Alarms (`EReminderWatcher`) are bound when `nixe-calendard` needs them (Calendar MVP).

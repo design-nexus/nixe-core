@@ -1,0 +1,8 @@
+[options]
+girs_directories = ["../.gir-files"]
+library = "EDataServer"
+version = "1.2"
+target_path = "."
+work_mode = "sys"
+single_version_file = true
+external_libraries = ["GLib", "GObject", "Gio", "Camel", "Json", "Soup", "libxml2"]

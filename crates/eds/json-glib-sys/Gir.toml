@@ -1,0 +1,8 @@
+[options]
+girs_directories = ["../.gir-files"]
+library = "Json"
+version = "1.0"
+target_path = "."
+work_mode = "sys"
+single_version_file = true
+external_libraries = ["GLib", "GObject", "Gio"]
