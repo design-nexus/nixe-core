@@ -133,7 +133,8 @@ pub struct Item {
     pub rule: Option<String>,
     pub has_alarms: bool,
     /// Alerts, in minutes before the start (negative: after it; "9:00 on the
-    /// day" of an all-day event is -540). Absolute alerts are not listed.
+    /// day" of an all-day event is -540); a task's count from its due time.
+    /// Absolute alerts are not listed.
     pub alarms: Vec<i64>,
     pub organizer: Option<Attendee>,
     pub attendees: Vec<Attendee>,
@@ -469,8 +470,16 @@ unsafe fn set_alarms(comp: *mut ical::ICalComponent, minutes: &[i64]) {
         for before in minutes {
             let Some(alarm) = Owned::new(ical::i_cal_component_new_valarm()) else { continue };
             add(alarm.ptr(), ical::i_cal_property_new_action(ical::I_CAL_ACTION_DISPLAY));
-            if let Some(trigger) = Owned::new(ical::i_cal_trigger_new_from_seconds((-before * 60) as c_int)) {
-                add(alarm.ptr(), ical::i_cal_property_new_trigger(trigger.ptr()));
+            if let Some(trigger) = Owned::new(ical::i_cal_trigger_new_from_seconds((-before * 60) as c_int))
+                && let Some(prop) = Owned::new(ical::i_cal_property_new_trigger(trigger.ptr()))
+            {
+                // A task usually has a due time and no start: its alerts count from the due time.
+                if ical::i_cal_component_isa(comp) == ical::I_CAL_VTODO_COMPONENT
+                    && let Some(related) = Owned::new(ical::i_cal_parameter_new_related(ical::I_CAL_RELATED_END))
+                {
+                    ical::i_cal_property_add_parameter(prop.ptr(), related.ptr());
+                }
+                ical::i_cal_component_add_property(alarm.ptr(), prop.ptr());
             }
             add(alarm.ptr(), ical::i_cal_property_new_description(cstring("Reminder").as_ptr()));
             ical::i_cal_component_add_component(comp, alarm.ptr());

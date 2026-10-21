@@ -309,3 +309,36 @@ fn changes_this_and_following() {
     cal.remove(&new_series, None, Scope::All).unwrap();
     cal.remove(&uid, None, Scope::All).unwrap();
 }
+
+#[test]
+#[ignore]
+fn task_alert_counts_from_the_due_time() {
+    let registry = registry();
+    let list = Calendar::open(&registry, LOCAL_TASKS, Kind::TaskList, None).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let uid = list
+        .create(&Draft { summary: Some("Call Sam".into()), due: Some(Some(When::Time(now + 20))), alarms: Some(vec![0]), ..Draft::default() })
+        .unwrap();
+    assert!(list.ics(&uid, None).unwrap().contains("RELATED=END"));
+    let reminders = nixe_eds::Reminders::new(&registry);
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    reminders.connect_due(move |due, _| sink.borrow_mut().extend(due.into_iter().map(|r| (r.source.clone(), r.item.summary.clone()))));
+    let fired = pump_until_secs(90, || seen.borrow().iter().any(|(_, s)| s == "Call Sam"));
+    list.remove(&uid, None, Scope::All).unwrap();
+    assert!(fired, "the task's alert fired");
+    assert!(seen.borrow().iter().any(|(source, _)| source == LOCAL_TASKS));
+}
+
+fn pump_until_secs(secs: u64, mut done: impl FnMut() -> bool) -> bool {
+    let ctx = glib::MainContext::default();
+    let until = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < until {
+        while ctx.iteration(false) {}
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
