@@ -23,12 +23,13 @@ flowchart TB
   Lib[nixe-accounts metadata only]
   GOA[goa-daemon]
   KR[gnome-keyring]
-  EDS[EDS Camel / EBook]
+  EDS[EDS EBook / ECal]
 
   UI --> Lib
   Lib -->|D-Bus properties and Remove| GOA
   GOA --> KR
   EDS -->|GetAccessToken in-process| GOA
+  Maild[nixe-maild] -->|GetAccessToken in-process| GOA
 ```
 
 Settings never needs a token. Contacts Phase 3 talks to EDS, which talks to GOA. Mail/Calendar later do the same.

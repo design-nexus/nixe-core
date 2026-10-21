@@ -8,11 +8,11 @@ UI rule: never show a service chip or switch unless that GOA object actually has
 
 | Provider | Typical `ProviderType` | Mail | Calendar | Contacts | Tasks | Files | Auth | Extra package |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Google | `google` | EDS Camel | EDS CalDAV | EDS CardDAV | EDS VTODO | `gvfs-google`; Files may be **disabled** in GOA 3.58 | OAuth2 + PKCE, browser | EDS |
+| Google | `google` | Nixe Mail (IMAP/SMTP, XOAUTH2) | EDS CalDAV | EDS CardDAV | EDS VTODO | `gvfs-google`; Files may be **disabled** in GOA 3.58 | OAuth2 + PKCE, browser | EDS |
 | Microsoft 365 | `ms_graph` (icon `goa-account-ms365`) | GOA Mail iface; **EDS needs evolution-ews** | GOA Calendar iface; EDS needs ews | GOA Contacts iface; EDS needs ews | no Todo iface | `Files` iface present (`gvfs-onedrive`) | OAuth2; GNOME client id in `accounts.conf` | EDS + ews |
 | Nextcloud | `webdav` | no (add IMAP/SMTP separately) | CalDAV | CardDAV | CalDAV VTODO | `gvfs-goa` WebDAV | app password / server login | EDS for DAV |
 | Exchange (EWS) | `exchange` | evolution-ews | evolution-ews | evolution-ews | | | password / autodiscover | EDS + ews |
-| IMAP and SMTP | `imap_smtp` | Camel | | | | | password | EDS |
+| IMAP and SMTP | `imap_smtp` | Nixe Mail (password) | | | | | password | EDS |
 | Kerberos / Fedora | `kerberos` / `fedora` | | | | | | ticket | |
 | ownCloud (legacy) | migrated to `webdav` | | | | | | | |
 

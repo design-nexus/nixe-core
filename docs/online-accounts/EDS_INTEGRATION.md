@@ -62,19 +62,9 @@ No Nixe Calendar/Reminders GTK apps exist in the workspace yet (Assistant has a 
 
 ## Mail decision
 
-**For GOA-backed accounts, use EDS Camel**, not a parallel Rust IMAP stack talking to Gmail with a copied refresh token.
+**Superseded (2026-10-21).** Mail does not use Camel. Nixe Mail runs its own IMAP/SMTP engine (`nixe-maild`) and takes server settings from the GOA `Mail` interface and credentials from GOA `OAuth2` / `Password` in-process, for each connection. Nothing is copied or stored. Reasons and details: [../pim/ARCHITECTURE.md](../pim/ARCHITECTURE.md#why-mail-is-not-in-eds).
 
-Reasons:
-
-- Camel IMAPX / SMTP already know Google and (with evolution-ews) Exchange/M365.
-- OAuth is GOA’s job; Camel asks EDS/GOA for tokens.
-- A custom IMAP client would still need `GetAccessToken`, XOAUTH2, and provider quirks.
-
-**When a custom Rust IMAP client is allowed:** providers GOA does not cover, or Ken explicitly rejects EDS’s gtk3/webkit dependency for Mail. That is a later Mail-phase decision, not a reason to store mail passwords in Nixe.
-
-Do not start `apps/mail` in Online Accounts phases 0–4.
-
-Nixe Mail, if/when built: GTK4 native message view (no WebKit), same as `STYLE.md`. Camel can stay in a worker process so the UI binary does not link webkit.
+Message bodies render in a locked-down WebKitGTK 6 view inside the Mail UI (no JavaScript, no network unless images are allowed). EDS is still the engine for calendars, task lists and address books.
 
 ## Drive and Notes
 

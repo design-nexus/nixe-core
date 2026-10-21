@@ -5,4 +5,4 @@ nixe-accounts (GOA/EDS metadata discovery), and nixe-sync (WebDAV journal).
 
 Check: `cargo check --locked --workspace`. Headless foundation: `cargo check --locked -p nixe-core --no-default-features`.
 
-Architecture and public API boundaries: [AGENTS.md](AGENTS.md).
+Architecture and public API boundaries: [AGENTS.md](AGENTS.md). Mail, Calendar and Reminders foundation: [docs/pim/ARCHITECTURE.md](docs/pim/ARCHITECTURE.md).

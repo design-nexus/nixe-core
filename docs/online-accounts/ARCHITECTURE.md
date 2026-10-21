@@ -27,7 +27,6 @@ flowchart TB
   Helper -->|libgoa-backend OAuth| GOA
   GOA --> Keyring[gnome-keyring Secret Service]
   GOA --> EDS[evolution-source-registry]
-  EDS --> Camel[Camel mail]
   EDS --> Books[EBook / CardDAV]
   EDS --> Cals[ECal / CalDAV / VTODO]
   GOA --> Gvfs[gvfs-goa / google / onedrive]
@@ -63,7 +62,7 @@ Passwords’ `nixe-passwordsd` remains the pattern for **Nixe-owned** secrets (V
 | `subscribe(Change)` | GOA signals |
 | `open_management()` | Launch `gnome-online-accounts-gtk` |
 
-Tokens never appear on a Nixe bus name. Apps that need an access token (Mail via Camel, or a later Drive adapter) call GOA’s OAuth2 interface in-process, or let EDS do it.
+Tokens never appear on a Nixe bus name. Apps that need an access token (Mail's `nixe-maild`, or a later Drive adapter) call GOA’s OAuth2 interface in-process, or let EDS do it.
 
 Binding: **gio 0.22 D-Bus** (GTK main loop). Not crates.io `goa` 0.0.3, not zbus/tokio, not `libgoa-backend` from Settings.
 
@@ -129,7 +128,7 @@ Rejected for Phase 1–2:
 
 ## EDS
 
-GOA does not sync PIM data. `evolution-source-registry` watches GOA and creates collection `ESource`s (`ESourceGoa`). Children are Camel stores, CardDAV books, CalDAV calendars, VTODO lists.
+GOA does not sync PIM data. `evolution-source-registry` watches GOA and creates collection `ESource`s (`ESourceGoa`). Children are mail identities (unused by Nixe), CardDAV books, CalDAV calendars, VTODO lists.
 
 Settings does not require EDS. Contacts/Calendar/Reminders/Mail do, when those apps want provider sync. See [EDS_INTEGRATION.md](EDS_INTEGRATION.md).
 
@@ -140,7 +139,7 @@ Settings does not require EDS. Contacts/Calendar/Reminders/Mail do, when those a
 | Contacts | GOA identity; EDS books as extra sources | EDS CardDAV |
 | Calendar | GOA identity; EDS calendars | EDS CalDAV |
 | Reminders | EDS tasks / VTODO; extra local metadata allowed | EDS |
-| Mail | GOA identity; Camel for GOA-backed mail | Camel |
+| Mail | GOA identity, `Mail` settings and in-process credentials | `nixe-maild` IMAP/SMTP |
 | Drive | GOA Files if the interface exists; rclone stays for the rest | GVFS or rclone, not both on one token |
 | Notes | Local Markdown; optional `nixe-sync` WebDAV | Not GOA |
 
