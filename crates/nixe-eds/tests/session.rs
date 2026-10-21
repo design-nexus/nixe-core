@@ -45,6 +45,8 @@ fn weekly_event_keeps_wall_clock_across_dst() {
 
     let cal = Calendar::open(&registry, LOCAL_CALENDAR, Kind::Calendar, None).unwrap();
     assert!(!cal.read_only());
+    assert!(cal.online());
+    cal.refresh().unwrap();
     let uid = cal
         .create(&Draft {
             summary: Some("Standup".into()),

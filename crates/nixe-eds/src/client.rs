@@ -89,6 +89,25 @@ impl Calendar {
         unsafe { edata_server_sys::e_client_is_readonly(self.raw().cast()) != 0 }
     }
 
+    /// The backend can reach its server. Offline calendars still read and write
+    /// their cache; EDS sends queued changes when they come back online.
+    pub fn online(&self) -> bool {
+        unsafe { edata_server_sys::e_client_is_online(self.raw().cast()) != 0 }
+    }
+
+    /// Asks the backend to sync with its server now. A no-op for backends without
+    /// refresh (local calendars). Changes arrive through [`Self::watch`].
+    pub fn refresh(&self) -> Result<(), Error> {
+        if unsafe { edata_server_sys::e_client_check_refresh_supported(self.raw().cast()) } == 0 {
+            return Ok(());
+        }
+        let mut err = std::ptr::null_mut();
+        if unsafe { edata_server_sys::e_client_refresh_sync(self.raw().cast(), std::ptr::null_mut(), &mut err) } == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        Ok(())
+    }
+
     /// The backend supports a capability (`edata_server_sys` / libecal names such
     /// as `"no-task-assignment"`). Used to hide controls a list can't store.
     pub fn can(&self, capability: &str) -> bool {
