@@ -611,12 +611,13 @@ pub(crate) unsafe fn apply(comp: *mut ical::ICalComponent, draft: &Draft) -> *mu
 
 /// Turns a fetched master into the occurrence starting at `rid`, the way EDS
 /// expects a single-occurrence change: RECURRENCE-ID and DTSTART set to the
-/// occurrence, DTEND moved by the same length, and the repeat rules dropped.
+/// occurrence, DTEND moved by the same length, and (for one occurrence, not
+/// "this and following") the repeat rules dropped.
 /// A component without repeat rules (already an occurrence) is left alone.
 ///
 /// # Safety
 /// `comp` must be a valid VEVENT or VTODO the caller owns.
-pub(crate) unsafe fn detach(comp: *mut ical::ICalComponent, rid: &str) {
+pub(crate) unsafe fn detach(comp: *mut ical::ICalComponent, rid: &str, keep_rules: bool) {
     unsafe {
         // EDS hands back the master (with RECURRENCE-ID already filled in) for an
         // occurrence that has not been changed before; only a master has rules.
@@ -653,8 +654,10 @@ pub(crate) unsafe fn detach(comp: *mut ical::ICalComponent, rid: &str) {
         remove_all(comp, ical::I_CAL_RECURRENCEID_PROPERTY);
         ical::i_cal_component_set_dtstart(comp, begins.ptr());
         ical::i_cal_component_set_recurrenceid(comp, occurrence.ptr());
-        for kind in [ical::I_CAL_RRULE_PROPERTY, ical::I_CAL_RDATE_PROPERTY, ical::I_CAL_EXDATE_PROPERTY, ical::I_CAL_EXRULE_PROPERTY] {
-            remove_all(comp, kind);
+        if !keep_rules {
+            for kind in [ical::I_CAL_RRULE_PROPERTY, ical::I_CAL_RDATE_PROPERTY, ical::I_CAL_EXDATE_PROPERTY, ical::I_CAL_EXRULE_PROPERTY] {
+                remove_all(comp, kind);
+            }
         }
     }
 }

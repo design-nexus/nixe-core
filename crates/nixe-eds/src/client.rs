@@ -270,7 +270,7 @@ impl Calendar {
         let comp = self.fetch(uid, rid)?;
         let scope = if rid.is_some() { scope } else { Scope::All };
         if let (Some(rid), Scope::This | Scope::ThisAndFollowing) = (rid, scope) {
-            unsafe { ical::detach(comp.ptr(), rid) };
+            unsafe { ical::detach(comp.ptr(), rid, scope == Scope::ThisAndFollowing) };
         }
         let zone = unsafe { ical::apply(comp.ptr(), draft) };
         self.add_zone(zone)?;
@@ -297,7 +297,7 @@ impl Calendar {
     pub fn respond(&self, uid: &str, rid: Option<&str>, emails: &[String], response: crate::Response) -> Result<bool, Error> {
         let comp = self.fetch(uid, rid)?;
         let scope = if let Some(rid) = rid {
-            unsafe { ical::detach(comp.ptr(), rid) };
+            unsafe { ical::detach(comp.ptr(), rid, false) };
             Scope::This
         } else {
             Scope::All

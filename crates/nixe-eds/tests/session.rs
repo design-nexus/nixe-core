@@ -277,3 +277,35 @@ fn imports_a_file_with_its_zone_and_exports_a_series() {
     cal.remove("file-1", None, Scope::All).unwrap();
     cal.remove("file-2", None, Scope::All).unwrap();
 }
+
+#[test]
+#[ignore]
+fn changes_this_and_following() {
+    let registry = registry();
+    let cal = Calendar::open(&registry, LOCAL_CALENDAR, Kind::Calendar, None).unwrap();
+    let uid = cal
+        .create(&Draft {
+            summary: Some("Class".into()),
+            start: Some(Some(When::Time(OCT_26_1000_EDT))),
+            end: Some(Some(When::Time(OCT_26_1000_EDT + HOUR))),
+            zone: Some("America/New_York".into()),
+            repeat: Some(Some("FREQ=WEEKLY;COUNT=4".into())),
+            ..Draft::default()
+        })
+        .unwrap();
+    let range = (OCT_26_1000_EDT - DAY, OCT_26_1000_EDT + 40 * DAY);
+    let all: Vec<_> = cal.instances(range.0, range.1).into_iter().filter(|i| i.uid == uid).collect();
+    assert_eq!(all.len(), 4);
+    let third = all[2].rid.clone().unwrap();
+    cal.modify(&uid, Some(&third), Scope::ThisAndFollowing, &Draft { summary: Some("Class (new room)".into()), ..Draft::default() })
+        .unwrap();
+    // EDS splits the series: the old one ends before the third class, and the
+    // rest becomes a new series (with a new uid).
+    let after = cal.instances(range.0, range.1);
+    let titles: Vec<&str> = after.iter().filter(|i| i.summary.starts_with("Class")).map(|i| i.summary.as_str()).collect();
+    assert_eq!(titles, vec!["Class", "Class", "Class (new room)", "Class (new room)"]);
+    let new_series = after.iter().find(|i| i.summary == "Class (new room)").map(|i| i.uid.clone()).unwrap();
+    assert_ne!(new_series, uid);
+    cal.remove(&new_series, None, Scope::All).unwrap();
+    cal.remove(&uid, None, Scope::All).unwrap();
+}
