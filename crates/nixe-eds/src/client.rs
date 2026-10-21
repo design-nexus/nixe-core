@@ -291,6 +291,31 @@ impl Calendar {
         Ok(())
     }
 
+    /// Marks a task done. A repeating task moves on to its next occurrence
+    /// instead (and stays open), the way EDS's own task tools do it.
+    pub fn complete(&self, uid: &str) -> Result<(), Error> {
+        let comp = self.fetch(uid, None)?;
+        let mut err = std::ptr::null_mut();
+        if unsafe { ecal::e_cal_util_mark_task_complete_sync(comp.ptr(), -1, self.raw(), std::ptr::null_mut(), &mut err) } == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_modify_object_sync(
+                self.raw(),
+                comp.ptr(),
+                ecal::E_CAL_OBJ_MOD_ALL,
+                ecal::E_CAL_OPERATION_FLAG_NONE,
+                std::ptr::null_mut(),
+                &mut err,
+            )
+        };
+        if ok == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        Ok(())
+    }
+
     /// Answers an invitation for whichever of `emails` is on the attendee list
     /// (the user's addresses). The server tells the organizer. Returns
     /// `Ok(false)` when none of the addresses is invited.

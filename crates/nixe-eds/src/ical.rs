@@ -614,6 +614,17 @@ pub(crate) unsafe fn apply(comp: *mut ical::ICalComponent, draft: &Draft) -> *mu
                 add(comp, ical::i_cal_property_new_relatedto(cstring(parent).as_ptr()));
             }
         }
+        // A repeating task repeats from its start; keep the start on the due date
+        // so completing it moves both to the next occurrence.
+        if ical::i_cal_component_isa(comp) == ical::I_CAL_VTODO_COMPONENT
+            && ical::i_cal_component_count_properties(comp, ical::I_CAL_RRULE_PROPERTY) > 0
+            && (draft.due.is_some() || draft.repeat.is_some())
+            && let Some(due) = Owned::new(ical::i_cal_component_get_due(comp))
+            && ical::i_cal_time_is_null_time(due.ptr()) == 0
+        {
+            remove_all(comp, ical::I_CAL_DTSTART_PROPERTY);
+            ical::i_cal_component_set_dtstart(comp, due.ptr());
+        }
     }
     zone
 }

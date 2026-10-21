@@ -342,3 +342,27 @@ fn pump_until_secs(secs: u64, mut done: impl FnMut() -> bool) -> bool {
     }
     false
 }
+
+#[test]
+#[ignore]
+fn completing_a_repeating_task_moves_it_on() {
+    let registry = registry();
+    let list = Calendar::open(&registry, LOCAL_TASKS, Kind::TaskList, None).unwrap();
+    let once = list.create(&Draft { summary: Some("Once".into()), due: Some(Some(When::Date { year: 2026, month: 11, day: 2 })), ..Draft::default() }).unwrap();
+    let weekly = list
+        .create(&Draft {
+            summary: Some("Water plants".into()),
+            due: Some(Some(When::Date { year: 2026, month: 11, day: 2 })),
+            repeat: Some(Some("FREQ=WEEKLY".into())),
+            ..Draft::default()
+        })
+        .unwrap();
+    list.complete(&once).unwrap();
+    list.complete(&weekly).unwrap();
+    assert!(list.get(&once, None).unwrap().is_done());
+    let next = list.get(&weekly, None).unwrap();
+    assert!(!next.is_done(), "a repeating task stays open");
+    assert_eq!(next.due, Some(When::Date { year: 2026, month: 11, day: 9 }));
+    list.remove(&once, None, Scope::All).unwrap();
+    list.remove(&weekly, None, Scope::All).unwrap();
+}
