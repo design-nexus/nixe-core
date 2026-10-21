@@ -128,6 +128,9 @@ pub struct Item {
     /// The parent task, for subtasks.
     pub parent: Option<String>,
     pub repeats: bool,
+    /// The repeat rule (an RRULE value such as `FREQ=WEEKLY;BYDAY=MO`), on the
+    /// series and on each of its occurrences.
+    pub rule: Option<String>,
     pub has_alarms: bool,
     /// Alerts, in minutes before the start (negative: after it; "9:00 on the
     /// day" of an all-day event is -540). Absolute alerts are not listed.
@@ -322,6 +325,7 @@ pub(crate) unsafe fn item(
             url: property_text(comp, ical::I_CAL_URL_PROPERTY),
             parent: property_text(comp, ical::I_CAL_RELATEDTO_PROPERTY),
             repeats,
+            rule: property_text(comp, ical::I_CAL_RRULE_PROPERTY),
             has_alarms: ical::i_cal_component_count_components(comp, ical::I_CAL_VALARM_COMPONENT) > 0,
             alarms: alarms(comp),
             organizer: property(comp, ical::I_CAL_ORGANIZER_PROPERTY).map(|p| attendee(p.ptr(), true)),
@@ -682,6 +686,7 @@ mod tests {
             assert_eq!(item.summary, "Pay rent");
             assert_eq!(item.due, Some(When::Date { year: 2026, month: 11, day: 1 }));
             assert!(item.repeats);
+            assert_eq!(item.rule.as_deref(), Some("FREQ=MONTHLY"));
             assert_eq!(item.priority, Some(5));
             assert_eq!(item.parent.as_deref(), Some("p1"));
 
