@@ -7,9 +7,9 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    container: archlinux:latest
+    container: archlinux@sha256:e43f1fd80e073992c5f173efbbbf65144170bf60aeb7369940087d63eacea8f4
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Publication prerequisite
         run: |
           if grep -R 'file://' --include='Cargo.toml' .; then
@@ -17,5 +17,5 @@ jobs:
             exit 1
           fi
       - name: Build prerequisites
-        run: pacman -Syu --noconfirm --needed base-devel rust gtk4 pkgconf git
+        run: bash tools/ci-bootstrap.sh
       - run: cargo check --locked --workspace
