@@ -275,6 +275,37 @@ impl Calendar {
         Ok(())
     }
 
+    /// Answers an invitation for whichever of `emails` is on the attendee list
+    /// (the user's addresses). The server tells the organizer. Returns
+    /// `Ok(false)` when none of the addresses is invited.
+    pub fn respond(&self, uid: &str, rid: Option<&str>, emails: &[String], response: crate::Response) -> Result<bool, Error> {
+        let comp = self.fetch(uid, rid)?;
+        let scope = if let Some(rid) = rid {
+            unsafe { ical::detach(comp.ptr(), rid) };
+            Scope::This
+        } else {
+            Scope::All
+        };
+        if !unsafe { ical::respond(comp.ptr(), emails, response) } {
+            return Ok(false);
+        }
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_modify_object_sync(
+                self.raw(),
+                comp.ptr(),
+                scope.raw(),
+                ecal::E_CAL_OPERATION_FLAG_NONE,
+                std::ptr::null_mut(),
+                &mut err,
+            )
+        };
+        if ok == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        Ok(true)
+    }
+
     /// Removes an item, or some occurrences of a repeating one.
     pub fn remove(&self, uid: &str, rid: Option<&str>, scope: Scope) -> Result<(), Error> {
         let uid = cstring(uid);

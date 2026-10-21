@@ -196,3 +196,57 @@ fn missing_items_are_not_found() {
     assert!(cal.get("no-such-uid", None).is_err());
     assert!(Calendar::open(&registry, "no-such-source", Kind::Calendar, None).is_err());
 }
+
+#[test]
+#[ignore]
+fn answers_an_invitation() {
+    let registry = registry();
+    let cal = Calendar::open(&registry, LOCAL_CALENDAR, Kind::Calendar, None).unwrap();
+    let ics = "BEGIN:VEVENT\r\nUID:invite-1\r\nDTSTAMP:20261021T000000Z\r\nDTSTART:20261203T150000Z\r\n\
+               DTEND:20261203T160000Z\r\nSUMMARY:Planning\r\nORGANIZER;CN=Alex:mailto:alex@example.com\r\n\
+               ATTENDEE;CN=Alex;PARTSTAT=ACCEPTED:mailto:alex@example.com\r\n\
+               ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\nEND:VEVENT\r\n";
+    cal.import(ics).unwrap();
+    assert!(!cal.respond("invite-1", None, &["other@example.com".into()], nixe_eds::Response::Accepted).unwrap());
+    assert!(cal.respond("invite-1", None, &["ME@example.com".into()], nixe_eds::Response::Accepted).unwrap());
+    let item = cal.get("invite-1", None).unwrap();
+    let me = item.attendees.iter().find(|a| a.email == "me@example.com").unwrap();
+    assert_eq!(me.response, nixe_eds::Response::Accepted);
+    assert_eq!(item.organizer.unwrap().name, "Alex");
+    cal.remove("invite-1", None, Scope::All).unwrap();
+}
+
+#[test]
+#[ignore]
+fn reminder_fires_when_due() {
+    let registry = registry();
+    let cal = Calendar::open(&registry, LOCAL_CALENDAR, Kind::Calendar, None).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let uid = cal
+        .create(&Draft {
+            summary: Some("Due soon".into()),
+            start: Some(Some(When::Time(now + 20))),
+            end: Some(Some(When::Time(now + 620))),
+            alarms: Some(vec![0]),
+            ..Draft::default()
+        })
+        .unwrap();
+    assert_eq!(cal.get(&uid, None).unwrap().alarms, vec![0]);
+    let reminders = nixe_eds::Reminders::new(&registry);
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    reminders.connect_due(move |due, _| sink.borrow_mut().extend(due));
+    let until = Instant::now() + Duration::from_secs(90);
+    let ctx = glib::MainContext::default();
+    while Instant::now() < until && !seen.borrow().iter().any(|r: &nixe_eds::Reminder| r.item.uid == uid) {
+        while ctx.iteration(false) {}
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let seen = seen.borrow();
+    let due = seen.iter().find(|r| r.item.uid == uid).expect("the reminder fired");
+    assert_eq!(due.item.summary, "Due soon");
+    assert_eq!(due.starts, now + 20);
+    assert_eq!(due.source, LOCAL_CALENDAR);
+    reminders.dismiss(due).unwrap();
+    cal.remove(&uid, None, Scope::All).unwrap();
+}

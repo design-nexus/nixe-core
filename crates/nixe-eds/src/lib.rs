@@ -6,6 +6,7 @@
 //! `nixe-*-sys` crates) that covers what Calendar and Reminders use:
 //!
 //! - [`Registry`]: the calendars and task lists, their account, color and visibility.
+//! - [`Reminders`]: alerts as they come due, with dismiss and snooze.
 //! - [`Calendar`]: one calendar or task list. It expands recurrences into instances
 //!   (with time zones, through libical), reads, creates, changes and removes items,
 //!   and gives a live [`View`] of changes.
@@ -17,10 +18,12 @@
 mod client;
 mod ical;
 mod registry;
+mod reminders;
 
 pub use client::{Calendar, Scope, View, range_query};
-pub use ical::{Draft, Item, ItemKind, Status, When, local_zone};
+pub use ical::{Attendee, Draft, Item, ItemKind, Response, Status, When, local_zone};
 pub use registry::{Kind, Registry, Source, Watch};
+pub use reminders::{Reminder, Reminders};
 
 use glib::translate::FromGlibPtrFull;
 

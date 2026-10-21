@@ -57,6 +57,56 @@ impl Status {
     }
 }
 
+/// An attendee's answer to an invitation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Response {
+    #[default]
+    NeedsAction,
+    Accepted,
+    Declined,
+    Tentative,
+    Other,
+}
+
+impl Response {
+    fn from_raw(raw: ical::ICalParameterPartstat) -> Self {
+        match raw {
+            ical::I_CAL_PARTSTAT_ACCEPTED => Self::Accepted,
+            ical::I_CAL_PARTSTAT_DECLINED => Self::Declined,
+            ical::I_CAL_PARTSTAT_TENTATIVE => Self::Tentative,
+            ical::I_CAL_PARTSTAT_NEEDSACTION => Self::NeedsAction,
+            _ => Self::Other,
+        }
+    }
+
+    pub(crate) fn raw(self) -> ical::ICalParameterPartstat {
+        match self {
+            Self::Accepted => ical::I_CAL_PARTSTAT_ACCEPTED,
+            Self::Declined => ical::I_CAL_PARTSTAT_DECLINED,
+            Self::Tentative => ical::I_CAL_PARTSTAT_TENTATIVE,
+            Self::NeedsAction | Self::Other => ical::I_CAL_PARTSTAT_NEEDSACTION,
+        }
+    }
+}
+
+/// Someone invited to an event, or its organizer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Attendee {
+    /// The address, without `mailto:`.
+    pub email: String,
+    pub name: String,
+    pub response: Response,
+    /// The organizer's chair, or someone only told about it.
+    pub chair: bool,
+    pub optional: bool,
+}
+
+impl Attendee {
+    pub fn label(&self) -> &str {
+        if self.name.is_empty() { &self.email } else { &self.name }
+    }
+}
+
 /// An event (or one occurrence of a repeating event) or a task.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
@@ -79,7 +129,11 @@ pub struct Item {
     pub parent: Option<String>,
     pub repeats: bool,
     pub has_alarms: bool,
-    pub attendees: usize,
+    /// Alerts, in minutes before the start (negative: after it; "9:00 on the
+    /// day" of an all-day event is -540). Absolute alerts are not listed.
+    pub alarms: Vec<i64>,
+    pub organizer: Option<Attendee>,
+    pub attendees: Vec<Attendee>,
 }
 
 impl Item {
@@ -113,6 +167,8 @@ pub struct Draft {
     pub priority: Option<Option<u8>>,
     pub url: Option<Option<String>>,
     pub parent: Option<Option<String>>,
+    /// Replaces every alert; see [`Item::alarms`].
+    pub alarms: Option<Vec<i64>>,
 }
 
 /// The system's IANA time zone name (`TZ`, else `/etc/localtime`), or `UTC`.
@@ -267,7 +323,119 @@ pub(crate) unsafe fn item(
             parent: property_text(comp, ical::I_CAL_RELATEDTO_PROPERTY),
             repeats,
             has_alarms: ical::i_cal_component_count_components(comp, ical::I_CAL_VALARM_COMPONENT) > 0,
-            attendees: ical::i_cal_component_count_properties(comp, ical::I_CAL_ATTENDEE_PROPERTY).max(0) as usize,
+            alarms: alarms(comp),
+            organizer: property(comp, ical::I_CAL_ORGANIZER_PROPERTY).map(|p| attendee(p.ptr(), true)),
+            attendees: attendees(comp),
+        }
+    }
+}
+
+fn address(value: Option<String>) -> String {
+    let value = value.unwrap_or_default();
+    match value.get(..7) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("mailto:") => value[7..].to_string(),
+        _ => value,
+    }
+}
+
+unsafe fn attendee(prop: *mut ical::ICalProperty, organizer: bool) -> Attendee {
+    unsafe {
+        let email = address(borrowed(if organizer {
+            ical::i_cal_property_get_organizer(prop)
+        } else {
+            ical::i_cal_property_get_attendee(prop)
+        }));
+        let param = |kind| Owned::new(ical::i_cal_property_get_first_parameter(prop, kind));
+        let name = param(ical::I_CAL_CN_PARAMETER).and_then(|p| borrowed(ical::i_cal_parameter_get_cn(p.ptr()))).unwrap_or_default();
+        let response = param(ical::I_CAL_PARTSTAT_PARAMETER)
+            .map(|p| Response::from_raw(ical::i_cal_parameter_get_partstat(p.ptr())))
+            .unwrap_or_default();
+        let role = param(ical::I_CAL_ROLE_PARAMETER).map(|p| ical::i_cal_parameter_get_role(p.ptr()));
+        Attendee {
+            email,
+            name,
+            response,
+            chair: role == Some(ical::I_CAL_ROLE_CHAIR),
+            optional: role == Some(ical::I_CAL_ROLE_OPTPARTICIPANT) || role == Some(ical::I_CAL_ROLE_NONPARTICIPANT),
+        }
+    }
+}
+
+unsafe fn attendees(comp: *mut ical::ICalComponent) -> Vec<Attendee> {
+    let mut out = Vec::new();
+    unsafe {
+        let mut next = Owned::new(ical::i_cal_component_get_first_property(comp, ical::I_CAL_ATTENDEE_PROPERTY));
+        while let Some(prop) = next {
+            out.push(attendee(prop.ptr(), false));
+            next = Owned::new(ical::i_cal_component_get_next_property(comp, ical::I_CAL_ATTENDEE_PROPERTY));
+        }
+    }
+    out
+}
+
+/// Sets this user's answer on every attendee line with one of `emails`.
+/// Returns whether any line matched.
+///
+/// # Safety
+/// `comp` must be a valid component the caller owns.
+pub(crate) unsafe fn respond(comp: *mut ical::ICalComponent, emails: &[String], response: Response) -> bool {
+    let mut matched = false;
+    unsafe {
+        let mut next = Owned::new(ical::i_cal_component_get_first_property(comp, ical::I_CAL_ATTENDEE_PROPERTY));
+        while let Some(prop) = next {
+            let email = address(borrowed(ical::i_cal_property_get_attendee(prop.ptr())));
+            if emails.iter().any(|e| e.eq_ignore_ascii_case(&email)) {
+                ical::i_cal_property_remove_parameter_by_kind(prop.ptr(), ical::I_CAL_PARTSTAT_PARAMETER);
+                if let Some(param) = Owned::new(ical::i_cal_parameter_new_partstat(response.raw())) {
+                    ical::i_cal_property_add_parameter(prop.ptr(), param.ptr());
+                }
+                matched = true;
+            }
+            next = Owned::new(ical::i_cal_component_get_next_property(comp, ical::I_CAL_ATTENDEE_PROPERTY));
+        }
+    }
+    matched
+}
+
+unsafe fn alarms(comp: *mut ical::ICalComponent) -> Vec<i64> {
+    let mut out = Vec::new();
+    unsafe {
+        let mut next = Owned::new(ical::i_cal_component_get_first_component(comp, ical::I_CAL_VALARM_COMPONENT));
+        while let Some(alarm) = next {
+            if let Some(prop) = property(alarm.ptr(), ical::I_CAL_TRIGGER_PROPERTY)
+                && let Some(trigger) = Owned::new(ical::i_cal_property_get_trigger(prop.ptr()))
+                && let Some(duration) = Owned::new(ical::i_cal_trigger_get_duration(trigger.ptr()))
+                && ical::i_cal_duration_is_bad_duration(duration.ptr()) == 0
+            {
+                let seconds = ical::i_cal_duration_as_seconds(duration.ptr()) as i64;
+                // An absolute trigger has a null duration and a time; skip those.
+                let absolute = Owned::new(ical::i_cal_trigger_get_time(trigger.ptr()))
+                    .is_some_and(|t| ical::i_cal_time_is_null_time(t.ptr()) == 0);
+                if !absolute {
+                    out.push(-seconds / 60);
+                }
+            }
+            next = Owned::new(ical::i_cal_component_get_next_component(comp, ical::I_CAL_VALARM_COMPONENT));
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+unsafe fn set_alarms(comp: *mut ical::ICalComponent, minutes: &[i64]) {
+    unsafe {
+        while let Some(alarm) = Owned::new(ical::i_cal_component_get_first_component(comp, ical::I_CAL_VALARM_COMPONENT)) {
+            ical::i_cal_component_remove_component(comp, alarm.ptr());
+        }
+        for before in minutes {
+            let Some(alarm) = Owned::new(ical::i_cal_component_new_valarm()) else { continue };
+            add(alarm.ptr(), ical::i_cal_property_new_action(ical::I_CAL_ACTION_DISPLAY));
+            if let Some(trigger) = Owned::new(ical::i_cal_trigger_new_from_seconds((-before * 60) as c_int)) {
+                add(alarm.ptr(), ical::i_cal_property_new_trigger(trigger.ptr()));
+            }
+            add(alarm.ptr(), ical::i_cal_property_new_description(cstring("Reminder").as_ptr()));
+            ical::i_cal_component_add_component(comp, alarm.ptr());
         }
     }
 }
@@ -380,6 +548,9 @@ pub(crate) unsafe fn apply(comp: *mut ical::ICalComponent, draft: &Draft) -> *mu
             if let Some(url) = url.as_deref().filter(|u| !u.is_empty()) {
                 add(comp, ical::i_cal_property_new_url(cstring(url).as_ptr()));
             }
+        }
+        if let Some(minutes) = &draft.alarms {
+            set_alarms(comp, minutes);
         }
         if let Some(parent) = &draft.parent {
             remove_all(comp, ical::I_CAL_RELATEDTO_PROPERTY);
@@ -536,6 +707,44 @@ mod tests {
             assert!(ics.contains("America/New_York"), "{ics}");
             assert!(ics.contains("20261102T100000"), "{ics}");
             assert_eq!(item(comp.ptr(), None, zone("UTC")).start, Some(When::Time(1_793_631_600)));
+        }
+    }
+
+    #[test]
+    fn reads_attendees_and_answers() {
+        let c = cstring(
+            "BEGIN:VEVENT\r\nUID:i\r\nDTSTART:20261102T150000Z\r\n\
+             ORGANIZER;CN=Alex:mailto:alex@example.com\r\n\
+             ATTENDEE;CN=Alex;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:alex@example.com\r\n\
+             ATTENDEE;PARTSTAT=NEEDS-ACTION;ROLE=OPT-PARTICIPANT:MAILTO:Me@Example.com\r\nEND:VEVENT\r\n",
+        );
+        let comp = unsafe { Owned::new(ical::i_cal_component_new_from_string(c.as_ptr())) }.unwrap();
+        unsafe {
+            let it = item(comp.ptr(), None, zone("UTC"));
+            assert_eq!(it.organizer.as_ref().map(|o| o.label()), Some("Alex"));
+            assert_eq!(it.attendees.len(), 2);
+            assert!(it.attendees[0].chair && it.attendees[0].response == Response::Accepted);
+            assert_eq!((it.attendees[1].email.as_str(), it.attendees[1].optional), ("Me@Example.com", true));
+            assert!(respond(comp.ptr(), &["me@example.com".into()], Response::Tentative));
+            assert!(!respond(comp.ptr(), &["nobody@example.com".into()], Response::Declined));
+            let it = item(comp.ptr(), None, zone("UTC"));
+            assert_eq!(it.attendees[1].response, Response::Tentative);
+            assert_eq!(it.attendees[0].response, Response::Accepted);
+        }
+    }
+
+    #[test]
+    fn alarms_round_trip() {
+        let comp = new_component(ItemKind::Event);
+        unsafe {
+            apply(comp.ptr(), &Draft { alarms: Some(vec![10, 0, 1440]), ..Draft::default() });
+            assert_eq!(item(comp.ptr(), None, zone("UTC")).alarms, vec![0, 10, 1440]);
+            apply(comp.ptr(), &Draft { alarms: Some(vec![-540]), ..Draft::default() });
+            let it = item(comp.ptr(), None, zone("UTC"));
+            assert_eq!(it.alarms, vec![-540]);
+            assert!(it.has_alarms);
+            apply(comp.ptr(), &Draft { alarms: Some(Vec::new()), ..Draft::default() });
+            assert!(item(comp.ptr(), None, zone("UTC")).alarms.is_empty());
         }
     }
 
