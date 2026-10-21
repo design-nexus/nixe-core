@@ -1,0 +1,24 @@
+name: Shared workspace release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        required: true
+        default: v0.1.0
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: archlinux@sha256:e43f1fd80e073992c5f173efbbbf65144170bf60aeb7369940087d63eacea8f4
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      - run: bash tools/ci-bootstrap.sh
+      - run: cargo check --locked --workspace
+      - run: python3 tools/release.py --tag "$RELEASE_TAG" --publish
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
