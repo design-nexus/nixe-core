@@ -1,6 +1,7 @@
 name: Standalone check
-# Enable PR/push events only after publication readiness passes.
-on: workflow_dispatch
+on:
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
