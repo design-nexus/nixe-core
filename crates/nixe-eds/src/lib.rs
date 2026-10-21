@@ -54,14 +54,23 @@ impl std::error::Error for Error {}
 /// `err` must be a non-null `GError` the caller owns.
 pub(crate) unsafe fn take_error(err: *mut glib_sys::GError) -> Error {
     let err = unsafe { glib::Error::from_glib_full(err) };
-    let domain = err.domain().as_str();
     let message = err.message().to_string();
-    if domain == "g-dbus-error-quark" || (domain == "g-io-error-quark" && message.to_lowercase().contains("timed out")) {
-        Error::Unavailable("Calendar data isn't available.".into())
-    } else if domain == "e-client-error" && message.to_lowercase().contains("not found") {
-        Error::NotFound(message)
+    let lower = message.to_lowercase();
+    // Only bus-level failures mean EDS itself is unreachable; EDS sends its own
+    // errors over D-Bus too.
+    const GONE: &[&str] = &["serviceunknown", "namehasnoowner", "noreply", "timeout", "timed out", "disconnected", "spawn"];
+    if GONE.iter().any(|g| lower.contains(g)) {
+        return Error::Unavailable("Calendar data isn't available.".into());
+    }
+    // "GDBus.Error:org.gnome.evolution....: text" -> "text"
+    let text = match message.strip_prefix("GDBus.Error:").and_then(|rest| rest.split_once(": ")) {
+        Some((_, text)) => text.to_string(),
+        None => message,
+    };
+    if lower.contains("not found") || lower.contains("no such") {
+        Error::NotFound(text)
     } else {
-        Error::Failed(message)
+        Error::Failed(text)
     }
 }
 

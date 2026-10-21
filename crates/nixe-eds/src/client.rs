@@ -80,6 +80,22 @@ impl Calendar {
         self.obj.as_ptr().cast()
     }
 
+    /// A zone this calendar knows by TZID (from VTIMEZONEs it has stored).
+    fn lookup(&self, tzid: &str) -> *mut icalsys::ICalTimezone {
+        let c = cstring(tzid);
+        let mut zone = std::ptr::null_mut();
+        let found = unsafe {
+            ecal::e_cal_client_get_timezone_sync(self.raw(), c.as_ptr(), &mut zone, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        if found == 0 { std::ptr::null_mut() } else { zone }
+    }
+
+    fn read(&self, comp: *mut icalsys::ICalComponent) -> Item {
+        let lookup = |tzid: &str| self.lookup(tzid);
+        let zones = ical::Zones { fallback: self.zone, lookup: Some(&lookup) };
+        unsafe { ical::item(comp, None, &zones) }
+    }
+
     pub fn kind(&self) -> Kind {
         self.kind
     }
@@ -179,7 +195,7 @@ impl Calendar {
             unsafe {
                 let comp = ecal::e_cal_component_get_icalcomponent((*node).data.cast());
                 if !comp.is_null() {
-                    out.push(ical::item(comp, None, self.zone));
+                    out.push(self.read(comp));
                 }
                 node = (*node).next;
             }
@@ -191,7 +207,7 @@ impl Calendar {
     /// One item (or one occurrence, with `rid`).
     pub fn get(&self, uid: &str, rid: Option<&str>) -> Result<Item, Error> {
         let comp = self.fetch(uid, rid)?;
-        Ok(unsafe { ical::item(comp.ptr(), None, self.zone) })
+        Ok(self.read(comp.ptr()))
     }
 
     /// One item as iCalendar text, for export.
@@ -363,6 +379,134 @@ impl Calendar {
         Ok(unsafe { owned(uid) }.unwrap_or_default())
     }
 
+    /// Imports every event (or task) in an iCalendar file, with its time zones,
+    /// the way EDS imports a published calendar: new items are added and items
+    /// already here (same uid) are updated. Returns the uids it contained.
+    pub fn import_all(&self, ics: &str) -> Result<Vec<String>, Error> {
+        let text = cstring(ics);
+        let parsed = unsafe { Owned::new(icalsys::i_cal_component_new_from_string(text.as_ptr())) }
+            .ok_or_else(|| Error::Failed("That isn't an iCalendar file.".into()))?;
+        let wanted = match self.kind {
+            Kind::Calendar => icalsys::I_CAL_VEVENT_COMPONENT,
+            Kind::TaskList => icalsys::I_CAL_VTODO_COMPONENT,
+        };
+        let calendar = if unsafe { icalsys::i_cal_component_isa(parsed.ptr()) } == icalsys::I_CAL_VCALENDAR_COMPONENT {
+            parsed
+        } else {
+            let wrapper = unsafe { Owned::new(icalsys::i_cal_component_new_vcalendar()) }.expect("libical allocates components");
+            unsafe { icalsys::i_cal_component_add_component(wrapper.ptr(), parsed.ptr()) };
+            wrapper
+        };
+        let mut uids = Vec::new();
+        unsafe {
+            let mut next = Owned::new(icalsys::i_cal_component_get_first_component(calendar.ptr(), wanted));
+            while let Some(comp) = next {
+                if let Some(uid) = crate::borrowed(icalsys::i_cal_component_get_uid(comp.ptr()))
+                    && !uids.contains(&uid)
+                {
+                    uids.push(uid);
+                }
+                next = Owned::new(icalsys::i_cal_component_get_next_component(calendar.ptr(), wanted));
+            }
+        }
+        if uids.is_empty() {
+            return Err(Error::Failed("The file has nothing to add here.".into()));
+        }
+        // EDS 3.62's local backend aborts (in libical's merge) when a file brings
+        // a VTIMEZONE it already has, so send only zones it doesn't know yet.
+        unsafe {
+            let mut known = Vec::new();
+            let mut next = Owned::new(icalsys::i_cal_component_get_first_component(calendar.ptr(), icalsys::I_CAL_VTIMEZONE_COMPONENT));
+            while let Some(zone) = next {
+                let tzid = Owned::new(icalsys::i_cal_component_get_first_property(zone.ptr(), icalsys::I_CAL_TZID_PROPERTY))
+                    .and_then(|p| owned(icalsys::i_cal_property_get_value_as_string(p.ptr())));
+                if tzid.is_some_and(|t| !self.lookup(&t).is_null()) {
+                    known.push(zone);
+                }
+                next = Owned::new(icalsys::i_cal_component_get_next_component(calendar.ptr(), icalsys::I_CAL_VTIMEZONE_COMPONENT));
+            }
+            for zone in known {
+                icalsys::i_cal_component_remove_component(calendar.ptr(), zone.ptr());
+            }
+        }
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_receive_objects_sync(
+                self.raw(),
+                calendar.ptr(),
+                ecal::E_CAL_OPERATION_FLAG_NONE,
+                std::ptr::null_mut(),
+                &mut err,
+            )
+        };
+        if ok == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        Ok(uids)
+    }
+
+    /// An item with all its changed occurrences and the time zones they use, as
+    /// a complete iCalendar file.
+    pub fn export(&self, uid: &str) -> Result<String, Error> {
+        let uid = cstring(uid);
+        let mut list = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let ok = unsafe {
+            ecal::e_cal_client_get_objects_for_uid_sync(self.raw(), uid.as_ptr(), &mut list, std::ptr::null_mut(), &mut err)
+        };
+        if ok == 0 {
+            return Err(unsafe { take_error(err) });
+        }
+        let calendar = unsafe { Owned::new(icalsys::i_cal_component_new_vcalendar()) }.expect("libical allocates components");
+        let mut tzids: Vec<String> = Vec::new();
+        unsafe {
+            for prop in [
+                icalsys::i_cal_property_new_version(cstring("2.0").as_ptr()),
+                icalsys::i_cal_property_new_prodid(cstring("-//Nixe//Calendar//EN").as_ptr()),
+            ] {
+                if let Some(prop) = Owned::new(prop) {
+                    icalsys::i_cal_component_add_property(calendar.ptr(), prop.ptr());
+                }
+            }
+            let mut node = list;
+            while !node.is_null() {
+                let comp = ecal::e_cal_component_get_icalcomponent((*node).data.cast());
+                if !comp.is_null() {
+                    for kind in [
+                        icalsys::I_CAL_DTSTART_PROPERTY,
+                        icalsys::I_CAL_DTEND_PROPERTY,
+                        icalsys::I_CAL_DUE_PROPERTY,
+                        icalsys::I_CAL_RECURRENCEID_PROPERTY,
+                    ] {
+                        if let Some(tzid) = ical::tzid_param(comp, kind)
+                            && !tzids.contains(&tzid)
+                        {
+                            tzids.push(tzid);
+                        }
+                    }
+                    if let Some(copy) = Owned::new(icalsys::i_cal_component_clone(comp)) {
+                        icalsys::i_cal_component_add_component(calendar.ptr(), copy.ptr());
+                    }
+                }
+                node = (*node).next;
+            }
+            edata_server_sys::e_client_util_free_object_slist(list);
+            for tzid in tzids {
+                let c = cstring(&tzid);
+                let mut zone = std::ptr::null_mut();
+                let found = ecal::e_cal_client_get_timezone_sync(self.raw(), c.as_ptr(), &mut zone, std::ptr::null_mut(), std::ptr::null_mut()) != 0;
+                if found
+                    && !zone.is_null()
+                    && let Some(vtimezone) = Owned::new(icalsys::i_cal_timezone_get_component(zone))
+                    && let Some(copy) = Owned::new(icalsys::i_cal_component_clone(vtimezone.ptr()))
+                {
+                    icalsys::i_cal_component_add_component(calendar.ptr(), copy.ptr());
+                }
+            }
+            Ok(owned(icalsys::i_cal_component_as_ical_string(calendar.ptr())).unwrap_or_default())
+        }
+    }
+
     fn add_zone(&self, zone: *mut icalsys::ICalTimezone) -> Result<(), Error> {
         if ical::is_utc(zone) {
             return Ok(());
@@ -425,7 +569,7 @@ unsafe extern "C" fn collect(
     _error: *mut *mut glib_sys::GError,
 ) -> glib_sys::gboolean {
     let data = unsafe { &mut *data.cast::<Collect>() };
-    data.out.push(unsafe { ical::item(comp, Some((start, end)), data.zone) });
+    data.out.push(unsafe { ical::item(comp, Some((start, end)), &ical::Zones::fixed(data.zone)) });
     1
 }
 

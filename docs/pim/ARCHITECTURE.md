@@ -138,4 +138,12 @@ Found while testing `nixe-eds` against a real EDS; the workarounds are in the cr
   until EDS restarts. For local calendars `Calendar::instances` expands each matching
   item from all of its components instead. CalDAV and Google calendars use EDS's
   cache and are not affected. Worth reporting upstream.
-- Alarms (`EReminderWatcher`) are bound when `nixe-calendard` needs them (Calendar MVP).
+- A time read from a lone component has no zone and doesn't report its TZID; the
+  TZID is a parameter on the property. `nixe-eds` reads that parameter and resolves it
+  through libical's built-in zones, then the calendar's own stored zones.
+- Importing a file whose VTIMEZONE the local calendar already has makes
+  `evolution-calendar-factory` abort inside libical (`icalcomponent_merge_component`).
+  `Calendar::import_all` drops zones the calendar already knows before importing.
+  Worth reporting upstream.
+- `EReminderWatcher` signal handlers must be disconnected before the watcher goes:
+  EDS can drop its last reference on another thread. `Reminders` does this on drop.

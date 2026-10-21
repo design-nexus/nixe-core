@@ -195,26 +195,55 @@ pub(crate) fn zone(name: &str) -> *mut ical::ICalTimezone {
     if zone.is_null() { unsafe { ical::i_cal_timezone_get_utc_timezone() } } else { zone }
 }
 
+/// How times without a resolved zone are read: a calendar's own zones (from an
+/// imported file, say) through `lookup`, else `fallback` for floating times.
+pub(crate) struct Zones<'a> {
+    pub fallback: *mut ical::ICalTimezone,
+    pub lookup: Option<&'a dyn Fn(&str) -> *mut ical::ICalTimezone>,
+}
+
+impl Zones<'_> {
+    pub(crate) fn fixed(fallback: *mut ical::ICalTimezone) -> Self {
+        Self { fallback, lookup: None }
+    }
+}
+
 /// The zone a time is in: its own, else the libical built-in zone its TZID
-/// names (a lone component has no VTIMEZONE to resolve against). Null for
-/// floating times and dates.
+/// names (a lone component has no VTIMEZONE to resolve against), else the
+/// calendar's zone of that name. Null for floating times and dates.
 ///
 /// # Safety
 /// `tt` must be a valid `ICalTime`.
 pub(crate) unsafe fn zone_of(tt: *mut ical::ICalTime) -> *mut ical::ICalTimezone {
+    unsafe { zone_in(tt, None, None) }
+}
+
+/// `param` is the TZID parameter of the property the time came from: an
+/// unresolved time doesn't carry its TZID itself.
+unsafe fn zone_in(
+    tt: *mut ical::ICalTime,
+    param: Option<&str>,
+    lookup: Option<&dyn Fn(&str) -> *mut ical::ICalTimezone>,
+) -> *mut ical::ICalTimezone {
     unsafe {
         let own = ical::i_cal_time_get_timezone(tt);
         if !own.is_null() {
             return own;
         }
-        let tzid = ical::i_cal_time_get_tzid(tt);
-        let Some(name) = borrowed(tzid) else { return std::ptr::null_mut() };
-        let found = ical::i_cal_timezone_get_builtin_timezone_from_tzid(tzid);
+        let Some(name) = borrowed(ical::i_cal_time_get_tzid(tt)).or_else(|| param.map(str::to_string)) else {
+            return std::ptr::null_mut();
+        };
+        let tzid = cstring(&name);
+        let found = ical::i_cal_timezone_get_builtin_timezone_from_tzid(tzid.as_ptr());
         if !found.is_null() {
             return found;
         }
         let location = cstring(name.rsplit_once("/freeassociation.sourceforge.net/").map_or(name.as_str(), |(_, l)| l));
-        ical::i_cal_timezone_get_builtin_timezone(location.as_ptr())
+        let builtin = ical::i_cal_timezone_get_builtin_timezone(location.as_ptr());
+        if !builtin.is_null() {
+            return builtin;
+        }
+        lookup.map_or(std::ptr::null_mut(), |find| find(&name))
     }
 }
 
@@ -224,7 +253,11 @@ pub(crate) fn is_utc(zone: *mut ical::ICalTimezone) -> bool {
 
 /// # Safety
 /// `tt` must be null or a valid `ICalTime`; `fallback` a valid zone.
-pub(crate) unsafe fn when(tt: *mut ical::ICalTime, fallback: *mut ical::ICalTimezone) -> Option<When> {
+pub(crate) unsafe fn when(tt: *mut ical::ICalTime, zones: &Zones) -> Option<When> {
+    unsafe { when_in(tt, None, zones) }
+}
+
+unsafe fn when_in(tt: *mut ical::ICalTime, param: Option<&str>, zones: &Zones) -> Option<When> {
     unsafe {
         if tt.is_null() || ical::i_cal_time_is_null_time(tt) != 0 || ical::i_cal_time_is_valid_time(tt) == 0 {
             return None;
@@ -236,8 +269,8 @@ pub(crate) unsafe fn when(tt: *mut ical::ICalTime, fallback: *mut ical::ICalTime
                 day: ical::i_cal_time_get_day(tt) as u32,
             });
         }
-        let own = zone_of(tt);
-        let zone = if own.is_null() { fallback } else { own };
+        let own = zone_in(tt, param, zones.lookup);
+        let zone = if own.is_null() { zones.fallback } else { own };
         Some(When::Time(ical::i_cal_time_as_timet_with_zone(tt, zone) as i64))
     }
 }
@@ -266,13 +299,14 @@ pub(crate) fn time(when: When, zone: *mut ical::ICalTimezone) -> Owned<ical::ICa
 pub(crate) unsafe fn item(
     comp: *mut ical::ICalComponent,
     instance: Option<(*mut ical::ICalTime, *mut ical::ICalTime)>,
-    fallback: *mut ical::ICalTimezone,
+    zones: &Zones,
 ) -> Item {
     unsafe {
         let kind = if ical::i_cal_component_isa(comp) == ical::I_CAL_VTODO_COMPONENT { ItemKind::Task } else { ItemKind::Event };
         let text = |p: *const std::ffi::c_char| borrowed(p).unwrap_or_default();
-        let owned_time = |tt: *mut ical::ICalTime| {
-            let value = when(tt, fallback);
+        let owned_time = |tt: *mut ical::ICalTime, kind: ical::ICalPropertyKind| {
+            let param = tzid_param(comp, kind).or_else(|| tzid_param(comp, ical::I_CAL_DTSTART_PROPERTY));
+            let value = when_in(tt, param.as_deref(), zones);
             if !tt.is_null() {
                 gobject_sys::g_object_unref(tt.cast());
             }
@@ -292,17 +326,17 @@ pub(crate) unsafe fn item(
                 if rid.is_none() && repeats && !start.is_null() {
                     rid = owned(ical::i_cal_time_as_ical_string(start));
                 }
-                (when(start, fallback), when(end, fallback))
+                (when(start, zones), when(end, zones))
             }
             None => (
-                owned_time(ical::i_cal_component_get_dtstart(comp)),
-                owned_time(ical::i_cal_component_get_dtend(comp)),
+                owned_time(ical::i_cal_component_get_dtstart(comp), ical::I_CAL_DTSTART_PROPERTY),
+                owned_time(ical::i_cal_component_get_dtend(comp), ical::I_CAL_DTEND_PROPERTY),
             ),
         };
-        let due = if kind == ItemKind::Task { owned_time(ical::i_cal_component_get_due(comp)) } else { None };
+        let due = if kind == ItemKind::Task { owned_time(ical::i_cal_component_get_due(comp), ical::I_CAL_DUE_PROPERTY) } else { None };
         let completed = property(comp, ical::I_CAL_COMPLETED_PROPERTY).and_then(|p| {
             let tt = ical::i_cal_property_get_completed(p.ptr());
-            owned_time(tt)
+            owned_time(tt, ical::I_CAL_COMPLETED_PROPERTY)
         });
         let repeats = repeats || rid.is_some();
         let priority = property(comp, ical::I_CAL_PRIORITY_PROPERTY)
@@ -441,6 +475,15 @@ unsafe fn set_alarms(comp: *mut ical::ICalComponent, minutes: &[i64]) {
             add(alarm.ptr(), ical::i_cal_property_new_description(cstring("Reminder").as_ptr()));
             ical::i_cal_component_add_component(comp, alarm.ptr());
         }
+    }
+}
+
+/// The TZID parameter of a component's first property of `kind`.
+pub(crate) unsafe fn tzid_param(comp: *mut ical::ICalComponent, kind: ical::ICalPropertyKind) -> Option<String> {
+    unsafe {
+        let prop = property(comp, kind)?;
+        let param = Owned::new(ical::i_cal_property_get_first_parameter(prop.ptr(), ical::I_CAL_TZID_PARAMETER))?;
+        borrowed(ical::i_cal_parameter_get_tzid(param.ptr()))
     }
 }
 
@@ -627,7 +670,7 @@ mod tests {
     fn read(ics: &str) -> Item {
         let c = cstring(ics);
         let comp = unsafe { Owned::new(ical::i_cal_component_new_from_string(c.as_ptr())) }.unwrap();
-        unsafe { item(comp.ptr(), None, zone("UTC")) }
+        unsafe { item(comp.ptr(), None, &Zones::fixed(zone("UTC"))) }
     }
 
     #[test]
@@ -682,7 +725,7 @@ mod tests {
         unsafe {
             apply(comp.ptr(), &draft);
             ical::i_cal_component_set_uid(comp.ptr(), cstring("x").as_ptr());
-            let item = item(comp.ptr(), None, zone("UTC"));
+            let item = item(comp.ptr(), None, &Zones::fixed(zone("UTC")));
             assert_eq!(item.summary, "Pay rent");
             assert_eq!(item.due, Some(When::Date { year: 2026, month: 11, day: 1 }));
             assert!(item.repeats);
@@ -691,7 +734,7 @@ mod tests {
             assert_eq!(item.parent.as_deref(), Some("p1"));
 
             apply(comp.ptr(), &Draft { done: Some(true), url: Some(None), repeat: Some(None), ..Draft::default() });
-            let item = super::item(comp.ptr(), None, zone("UTC"));
+            let item = super::item(comp.ptr(), None, &Zones::fixed(zone("UTC")));
             assert!(item.is_done());
             assert_eq!(item.url, None);
             assert!(!item.repeats);
@@ -711,7 +754,7 @@ mod tests {
             let ics = owned(ical::i_cal_component_as_ical_string(comp.ptr())).unwrap();
             assert!(ics.contains("America/New_York"), "{ics}");
             assert!(ics.contains("20261102T100000"), "{ics}");
-            assert_eq!(item(comp.ptr(), None, zone("UTC")).start, Some(When::Time(1_793_631_600)));
+            assert_eq!(item(comp.ptr(), None, &Zones::fixed(zone("UTC"))).start, Some(When::Time(1_793_631_600)));
         }
     }
 
@@ -725,14 +768,14 @@ mod tests {
         );
         let comp = unsafe { Owned::new(ical::i_cal_component_new_from_string(c.as_ptr())) }.unwrap();
         unsafe {
-            let it = item(comp.ptr(), None, zone("UTC"));
+            let it = item(comp.ptr(), None, &Zones::fixed(zone("UTC")));
             assert_eq!(it.organizer.as_ref().map(|o| o.label()), Some("Alex"));
             assert_eq!(it.attendees.len(), 2);
             assert!(it.attendees[0].chair && it.attendees[0].response == Response::Accepted);
             assert_eq!((it.attendees[1].email.as_str(), it.attendees[1].optional), ("Me@Example.com", true));
             assert!(respond(comp.ptr(), &["me@example.com".into()], Response::Tentative));
             assert!(!respond(comp.ptr(), &["nobody@example.com".into()], Response::Declined));
-            let it = item(comp.ptr(), None, zone("UTC"));
+            let it = item(comp.ptr(), None, &Zones::fixed(zone("UTC")));
             assert_eq!(it.attendees[1].response, Response::Tentative);
             assert_eq!(it.attendees[0].response, Response::Accepted);
         }
@@ -743,13 +786,13 @@ mod tests {
         let comp = new_component(ItemKind::Event);
         unsafe {
             apply(comp.ptr(), &Draft { alarms: Some(vec![10, 0, 1440]), ..Draft::default() });
-            assert_eq!(item(comp.ptr(), None, zone("UTC")).alarms, vec![0, 10, 1440]);
+            assert_eq!(item(comp.ptr(), None, &Zones::fixed(zone("UTC"))).alarms, vec![0, 10, 1440]);
             apply(comp.ptr(), &Draft { alarms: Some(vec![-540]), ..Draft::default() });
-            let it = item(comp.ptr(), None, zone("UTC"));
+            let it = item(comp.ptr(), None, &Zones::fixed(zone("UTC")));
             assert_eq!(it.alarms, vec![-540]);
             assert!(it.has_alarms);
             apply(comp.ptr(), &Draft { alarms: Some(Vec::new()), ..Draft::default() });
-            assert!(item(comp.ptr(), None, zone("UTC")).alarms.is_empty());
+            assert!(item(comp.ptr(), None, &Zones::fixed(zone("UTC"))).alarms.is_empty());
         }
     }
 

@@ -250,3 +250,30 @@ fn reminder_fires_when_due() {
     reminders.dismiss(due).unwrap();
     cal.remove(&uid, None, Scope::All).unwrap();
 }
+
+#[test]
+#[ignore]
+fn imports_a_file_with_its_zone_and_exports_a_series() {
+    let registry = registry();
+    let cal = Calendar::open(&registry, LOCAL_CALENDAR, Kind::Calendar, None).unwrap();
+    // A zone EDS has never seen, named the way Outlook names them.
+    let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nMETHOD:PUBLISH\r\n\
+        BEGIN:VTIMEZONE\r\nTZID:Test Standard Time\r\nBEGIN:STANDARD\r\nDTSTART:19700101T000000\r\n\
+        TZOFFSETFROM:-0300\r\nTZOFFSETTO:-0300\r\nTZNAME:TST\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n\
+        BEGIN:VEVENT\r\nUID:file-1\r\nDTSTAMP:20261021T000000Z\r\nDTSTART;TZID=Test Standard Time:20261202T090000\r\n\
+        DTEND;TZID=Test Standard Time:20261202T100000\r\nRRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:From a file\r\nEND:VEVENT\r\n\
+        BEGIN:VEVENT\r\nUID:file-2\r\nDTSTAMP:20261021T000000Z\r\nDTSTART;VALUE=DATE:20261205\r\nSUMMARY:Second\r\nEND:VEVENT\r\n\
+        END:VCALENDAR\r\n";
+    assert_eq!(cal.import_all(ics).unwrap(), vec!["file-1".to_string(), "file-2".to_string()]);
+    // 09:00 at UTC-3 is 12:00 UTC.
+    assert_eq!(cal.get("file-1", None).unwrap().start, Some(When::Time(1_796_212_800)));
+    // Importing again updates rather than failing.
+    assert_eq!(cal.import_all(ics).unwrap().len(), 2);
+
+    let out = cal.export("file-1").unwrap();
+    assert!(out.starts_with("BEGIN:VCALENDAR"), "{out}");
+    assert!(out.contains("BEGIN:VTIMEZONE") && out.contains("Test Standard Time"), "{out}");
+    assert!(out.contains("SUMMARY:From a file"), "{out}");
+    cal.remove("file-1", None, Scope::All).unwrap();
+    cal.remove("file-2", None, Scope::All).unwrap();
+}

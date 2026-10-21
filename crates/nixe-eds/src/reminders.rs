@@ -119,7 +119,7 @@ unsafe fn reminder(rd: *const ecal::EReminderData) -> Option<Reminder> {
             return None;
         }
         let utc = ical::zone("UTC");
-        let item = ical::item(icomp, None, utc);
+        let item = ical::item(icomp, None, &ical::Zones::fixed(utc));
         let raw = ecal::e_reminder_data_copy(rd);
         Some(Reminder {
             source: borrowed(ecal::e_reminder_data_get_source_uid(rd)).unwrap_or_default(),
