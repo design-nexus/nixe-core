@@ -109,10 +109,45 @@ Accounts.
 | --- | --- | --- |
 | `io.github.design_nexus.nixe.Control` | Mail, Calendar and Reminders app ids | Assistant and other apps (`nixe_core::control`) |
 | `io.github.design_nexus.nixe.MailEngine1` | `nixe-maild` | Mail UI only; versioned, private to `nixe-mail` |
-| `io.github.design_nexus.nixe.CalendarEngine1` | `nixe-calendard` | `Agenda`, `FreeBusy`, `QuickCreate` |
-| Read-only SQLite snapshots | `mail.sqlite`, `agenda.sqlite`, `today.sqlite` | Glimpse plugins; schema is a contract recorded in `suite.toml` |
+| Read-only SQLite | `mail.sqlite` (nixe-maild), `agenda.sqlite` (nixe-calendard), `tasks.sqlite` (nixe-remindersd) | Glimpse plugins; schemas are contracts |
+| `--describe` | `nixe-mail`, `nixe-calendar`, `nixe-reminders` | The Control tools as JSON, without a window (Assistant's abilities) |
+| `--find QUERY` | `nixe-contacts` | `contacts.find`'s answer as JSON, read-only, without a window (Mail's recipient suggestions) |
 
 No interface returns tokens or passwords.
+
+## Suite integration
+
+**Glimpse.** Each app ships a plugin (`apps/<app>-glimpse`, installed to
+`~/.local/share/nixe-<app>/glimpse`, added with `nixe-glimpse plugins install-local`). Glimpse
+mounts only that app's database read-only into the sandbox (`NIXE_MAIL_DB`,
+`NIXE_CALENDAR_DB`, `NIXE_REMINDERS_DB`); no store, sidecar or credentials. The sandbox has no
+time zone, so `agenda.sqlite` and `tasks.sqlite` record `meta.utc_offset`. Results act
+through the host (`nixe-glimpse` `pim.rs`), which checks each token field by field and only
+for the plugin's own app:
+
+| Token (`"api_version": 1`) | Host runs |
+| --- | --- |
+| `{"app": "mail", "op": "open", "message": ID}` | `nixe-mail --message ID` |
+| `{"app": "calendar", "op": "open", "day": "YYYY-MM-DD"}` | `nixe-calendar --date DAY` |
+| `{"app": "calendar", "op": "join", "url": "https://…"}` | opens the link, on Meet, Zoom, Teams, Jitsi or Whereby hosts only |
+| `{"app": "reminders", "op": "open", "list": UID}` | `nixe-reminders --section list:UID` |
+| `{"app": "reminders", "op": "add", "text": …}` | `nixe-reminders --add TEXT` |
+
+**Assistant.** The `mail` ability works Mail's Control tools (`mail.search`, `mail.inbox`,
+`mail.read`, `mail.open`, `mail.draft`). There is no sending tool, and policy disables
+`mail.send`: mail goes out only when the user presses Send. The `calendar` and `reminders`
+abilities offer the apps' tools under the same names when the apps are installed (read
+with `--describe`) and fall back to their local stores otherwise; timers stay in the
+`reminders` ability, and a spoken dated reminder goes to the app's lists. Task-list
+changes (`reminders.complete`, `edit`, `delete`) and calendar changes need approval;
+mail, events and tasks come back as untrusted content.
+
+**Notifications.** `nixe-maild` notifies about new mail (not while the window is in
+front); clicking one runs `nixe-mail --message ID`. `nixe-calendard` and
+`nixe-remindersd` notify for events and tasks respectively.
+
+**Settings.** Online Accounts says which installed Nixe app uses each service, and what a
+Microsoft 365 account can't do yet.
 
 ## Providers
 
